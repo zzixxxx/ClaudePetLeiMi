@@ -2,6 +2,28 @@
 
 透明置顶小窗口，根据 Claude Code 实时工作状态播放对应 GIF。
 
+## 一键安装
+
+前提：Windows 10/11 + [Python 3.10+](https://www.python.org/downloads/)（安装时勾选 Add to PATH）+ Claude Code。
+
+PowerShell 里执行：
+
+```powershell
+irm https://raw.githubusercontent.com/zzixxxx/ClaudePetLeiMi/main/install.ps1 | iex
+```
+
+脚本会自动：下载最新代码到 `%LOCALAPPDATA%\ClaudePetLeiMi` → 安装 Pillow/pystray →
+把 hooks 与 statusLine **合并**进 `~/.claude/settings.json`（幂等，不影响你已有的
+hooks；已有自定义 statusLine 时不覆盖）→ 创建开机自启与桌面快捷方式 → 启动桌宠。
+重复运行即为升级。正在运行的 Claude Code 会话需重启后才会驱动桌宠。
+
+卸载：删除安装目录和两个 `ClaudePetLeiMi.lnk` 快捷方式，从 `~/.claude/settings.json`
+移除含 `cc_pet_hook.py` 的 hooks 条目与 statusLine。
+
+> 为什么不提供 exe：hooks 在 Claude Code 每个事件时都要拉起一次，PyInstaller exe
+> 冷启动 1~2s 会拖慢每次工具调用（`python xx.py` 只要几十毫秒），且单文件 exe
+> 易被杀软误报。Python 是本工具的硬依赖。
+
 ## 状态机与 GIF 映射
 
 | 状态 | GIF | 触发 |
