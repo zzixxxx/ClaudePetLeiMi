@@ -103,6 +103,7 @@ hooks；已有自定义 statusLine 时不覆盖）→ 创建开机自启与桌�
 - GIF 边缘：alpha 阈值 128 二值化（去品红键色混边）。曾试过 MinFilter 腐蚀收边去白圈，
   效果不佳已回退——GIF 边缘白圈是作者对白底烘焙的，腐蚀会啃掉描边，接受现状。
 - 调试参数：`claude_pet.pyw --popup` / `--sessions` / `--menu` 启动即开对应面板/菜单。
+- **用量拿不到数据时**：`python claude_pet.pyw --diag` 逐项检查凭证/接口/statusline/hooks 四环。
 - 用量面板行都挂在同一个共享 grid（col0 minsize 134），否则各行列宽独立算、进度条不对齐。
 
 ## 操作
