@@ -37,6 +37,14 @@ Write-Host "安装依赖 (Pillow / pystray) ..."
 
 # 4. 合并 hooks / statusLine 到 ~/.claude/settings.json (幂等)
 & python (Join-Path $dest "install_hooks.py")
+$settingsPath = Join-Path $env:USERPROFILE ".claude\settings.json"
+$ok = (Test-Path $settingsPath) -and ((Get-Content $settingsPath -Raw) -match "cc_pet_hook")
+if (-not $ok) {
+    Write-Host "警告: hooks 未成功写入 $settingsPath" -ForegroundColor Red
+    Write-Host "请手动执行: python `"$(Join-Path $dest 'install_hooks.py')`"" -ForegroundColor Red
+} else {
+    Write-Host "hooks 已写入 $settingsPath" -ForegroundColor Green
+}
 
 # 5. 开机自启 + 桌面快捷方式
 $pythonw = Join-Path (Split-Path (Get-Command python).Source) "pythonw.exe"

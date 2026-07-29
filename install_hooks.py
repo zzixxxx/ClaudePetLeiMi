@@ -59,16 +59,16 @@ def main():
             "command": f'python "{STATUSLINE}"',
             "refreshInterval": 60,
         }
-        print("statusLine 已配置")
+        print("statusLine: configured")
     else:
-        print("检测到已有自定义 statusLine, 未覆盖 (如需用量兜底可手动整合 cc_statusline.py)")
+        print("statusLine: custom one detected, left untouched")
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
-    print("hooks 已写入:", path)
+    print("hooks written to:", path)
 
 
 if __name__ == "__main__":
