@@ -1,0 +1,8 @@
+# 运行时产物
+__pycache__/
+pet.pid
+pet_config.json
+debug_bar_*.png
+
+# 商业字体不随仓库分发 (已回退未使用, 本地备用)
+assets/Impact.ttf
