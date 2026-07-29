@@ -1126,7 +1126,78 @@ class Pet:
         self.root.mainloop()
 
 
+def run_diagnostics():
+    """--diag: 逐项检查用量数据链路, 用 python (而非 pythonw) 运行看输出."""
+    print("== ClaudePetLeiMi usage diagnostics ==")
+    # 1. Claude Code 凭证
+    if os.path.exists(CRED_FILE):
+        try:
+            with open(CRED_FILE, encoding="utf-8") as f:
+                cred = json.load(f)
+            oauth = cred.get("claudeAiOauth") or cred
+            token = oauth.get("accessToken")
+            exp = (oauth.get("expiresAt") or 0) / 1000
+            state = "valid" if exp > time.time() else "EXPIRED"
+            print(f"[1] credentials: found | subscriptionType="
+                  f"{oauth.get('subscriptionType')}"
+                  f" | token={'yes' if token else 'NO'} | {state}"
+                  f" ({(exp - time.time()) / 3600:.1f}h left)")
+            if not oauth.get("subscriptionType"):
+                print("    -> not a claude.ai subscription login; no usage windows")
+        except Exception as e:
+            print("[1] credentials parse FAILED:", e)
+    else:
+        print("[1] credentials file NOT FOUND:", CRED_FILE)
+        print("    -> Claude Code not logged in on this machine, or not"
+              " logged in with a claude.ai subscription account")
+    # 2. 用量接口直查
+    try:
+        result = fetch_usage_api()
+        if result:
+            print("[2] usage API: OK ->", result[0])
+        else:
+            print("[2] usage API: SKIPPED (no token or expired; start a"
+                  " Claude Code session so it refreshes the token, then retry)")
+    except urllib.error.HTTPError as e:
+        print(f"[2] usage API HTTP {e.code} {e.reason}")
+        if e.code in (401, 403):
+            print("    -> token invalid, or not a subscription account")
+        elif e.code == 429:
+            print("    -> rate limited, retry later")
+    except Exception as e:
+        print(f"[2] usage API network FAILED: {type(e).__name__}: {e}")
+        print("    -> check this machine can reach api.anthropic.com"
+              " (a proxy that does not cover python, or a firewall,"
+              " will cause this)")
+    # 3. statusline 兜底
+    if os.path.exists(USAGE_FILE):
+        try:
+            with open(USAGE_FILE, encoding="utf-8") as f:
+                d = json.load(f)
+            age = (time.time() - d.get("_saved_at", 0)) / 60
+            print(f"[3] statusline dump: found | updated {age:.0f} min ago"
+                  f" | rate_limits="
+                  f"{'yes' if d.get('rate_limits') else 'NO'}")
+        except Exception as e:
+            print("[3] statusline dump parse FAILED:", e)
+    else:
+        print("[3] statusline dump NOT FOUND")
+        print("    -> no Claude Code session has run since install, or"
+              " statusLine not configured / python not on PATH")
+    # 4. hooks 状态文件
+    print(f"[4] hook state files:"
+          f" state={'yes' if os.path.exists(STATE_FILE) else 'NO'}"
+          f" | sessions={'yes' if os.path.exists(SESS_FILE) else 'NO'}")
+    if not os.path.exists(STATE_FILE):
+        print("    -> hooks not firing: check ~/.claude/settings.json has"
+              " cc_pet_hook entries, and restart Claude Code sessions"
+              " after install")
+
+
 if __name__ == "__main__":
+    if "--diag" in sys.argv:
+        run_diagnostics()
+        sys.exit(0)
     replace_existing_instance()
     pet = Pet()
     if "--popup" in sys.argv:      # 调试: 启动即开用量面板
