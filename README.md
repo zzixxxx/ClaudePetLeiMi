@@ -34,7 +34,7 @@ Claude Code 在干什么，桌宠就演什么（透明置顶小窗，任意拖�
 
 - **托盘左键**：新建一个 Claude Desktop 对话
 - **托盘右键 / 桌宠右键**：仿亚克力菜单 —— Show App（打开 Claude Desktop）/
-  用量详情 / 会话状态 / 检查更新 / 退出
+  用量详情 / 会话状态 / 检查更新 / 卸载 / 退出
 - **双击桌宠**：打开用量详情
 - 面板点击空白处自动关闭
 
@@ -54,6 +54,8 @@ irm https://raw.githubusercontent.com/zzixxxx/ClaudePetLeiMi/main/install.ps1 | 
 重复运行同一命令即为升级。
 
 ## 卸载
+
+右键菜单点「卸载」（有二次确认），或运行：
 
 ```powershell
 irm https://raw.githubusercontent.com/zzixxxx/ClaudePetLeiMi/main/uninstall.ps1 | iex
