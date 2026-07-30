@@ -59,6 +59,7 @@ foreach ($lnkPath in $targets) {
     $lnk.TargetPath = $pythonw
     $lnk.Arguments = "`"$(Join-Path $dest 'claude_pet.pyw')`""
     $lnk.WorkingDirectory = $dest
+    $lnk.IconLocation = "$(Join-Path $dest 'assets\pet.ico'),0"
     $lnk.Save()
 }
 

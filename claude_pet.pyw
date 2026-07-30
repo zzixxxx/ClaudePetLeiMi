@@ -55,6 +55,7 @@ USAGE_API_FRESH_S = 600     # API 数据 10 分钟内算新鲜, 否则退回 sta
 CLAUDE_UA = "claude-code/2.1.220"
 
 ASSET_DIR = os.path.join(BASE, "assets")  # Impact.ttf 备而不用 (已回退)
+ICON_PNG = os.path.join(ASSET_DIR, "pet.png")  # 托盘/快捷方式图标
 UI_FONT = "Microsoft YaHei UI"  # 面板字体, 与右键菜单 (msyh.ttc) 一致
 
 PET_SIZE = 200                 # 显示尺寸(像素)
@@ -614,18 +615,15 @@ class Pet:
                         0, lambda x=pt.x, y=pt.y:
                         pet._show_menu(x, y, prefer_up=True))
 
+        try:
+            icon_img = Image.open(ICON_PNG).convert("RGBA").resize(
+                (64, 64), Image.LANCZOS)
+        except Exception:
+            icon_img = draw_badge(0, 0)  # 图标缺失时退回数字徽章
         self.tray_icon = FlyoutIcon(
-            "ClaudePetLeiMi", draw_badge(0, 0), "ClaudePetLeiMi",
+            "ClaudePetLeiMi", icon_img, "ClaudePetLeiMi",
         )
         self.tray_icon.run_detached()
-
-    def _update_tray(self, windows):
-        if not (self.tray_icon and windows):
-            return
-        d = {label: (pct, reset) for label, pct, reset in windows}
-        pct5, _ = d.get("5h", (0, None))
-        pct7, _ = d.get("7d", (0, None))
-        self.tray_icon.icon = draw_badge(pct5, pct7)
 
     # ---------- 用量详情面板 ----------
 
@@ -1117,7 +1115,6 @@ class Pet:
                     windows = extract_usage(json.load(f))
             except Exception:
                 pass
-        self._update_tray(windows)
         self._refresh_popup()
         self._refresh_sessions()
         self.root.after(15000, self._poll_usage)
