@@ -440,13 +440,8 @@ class Pet:
             pass
 
     def _uninstall(self):
-        """菜单"卸载": 二次确认后执行 uninstall.ps1 并退出."""
-        from tkinter import messagebox
-        if not messagebox.askyesno(
-                "卸载 ClaudePetLeiMi",
-                "确定要卸载吗？\n\n将移除 Claude Code hooks 配置、"
-                "开机自启、桌面快捷方式和程序文件。",
-                parent=self.root):
+        """菜单"卸载": 挽留弹窗(蕾米图+共犯提示语)确认后执行 uninstall.ps1 并退出."""
+        if not self._confirm_uninstall():
             return
         import subprocess
         import tempfile
@@ -458,6 +453,56 @@ class Pet:
                  "-File", script],
                 cwd=tempfile.gettempdir(), creationflags=CREATE_NO_WINDOW)
         self._quit()
+
+    def _confirm_uninstall(self):
+        """卸载二次确认: 蕾米图 + "是否不再成为蕾米埃尔的共犯？"; 图缺失时退化为纯文字弹窗."""
+        img_path = os.path.join(ASSET_DIR, "uninstall.png")
+        if not os.path.exists(img_path):
+            from tkinter import messagebox
+            return messagebox.askyesno("卸载 ClaudePetLeiMi",
+                                       "是否不再成为蕾米埃尔的共犯？",
+                                       parent=self.root)
+
+        result = {"ok": False}
+        win = tk.Toplevel(self.root)
+        win.title("卸载 ClaudePetLeiMi")
+        win.resizable(False, False)
+        win.attributes("-topmost", True)
+        try:
+            win.iconbitmap(os.path.join(ASSET_DIR, "pet.ico"))
+        except Exception:
+            pass
+
+        photo = ImageTk.PhotoImage(Image.open(img_path))
+        win._photo = photo  # 持引用防 GC 白图
+        tk.Label(win, image=photo).pack(padx=24, pady=(18, 8))
+        tk.Label(win, text="是否不再成为蕾米埃尔的共犯？",
+                 font=("Microsoft YaHei UI", 11)).pack(padx=28, pady=(0, 14))
+
+        btns = tk.Frame(win)
+        btns.pack(pady=(0, 16))
+
+        def choose(ok):
+            result["ok"] = ok
+            win.destroy()
+
+        tk.Button(btns, text="是", width=10,
+                  command=lambda: choose(True)).pack(side="left", padx=8)
+        no_btn = tk.Button(btns, text="否", width=10,
+                           command=lambda: choose(False))
+        no_btn.pack(side="left", padx=8)
+
+        win.bind("<Escape>", lambda e: choose(False))
+        win.protocol("WM_DELETE_WINDOW", lambda: choose(False))
+        # 居中 + 模态; 默认焦点给"否"(挽留)
+        win.update_idletasks()
+        w, h = win.winfo_width(), win.winfo_height()
+        win.geometry(f"+{(win.winfo_screenwidth() - w) // 2}"
+                     f"+{(win.winfo_screenheight() - h) // 2}")
+        no_btn.focus_set()
+        win.grab_set()
+        win.wait_window()
+        return result["ok"]
 
     def _manual_update(self):
         def run():
@@ -506,16 +551,27 @@ class Pet:
         self.root.after(2500, self._refresh_popup)
 
     def _check_alerts(self, windows):
-        """阈值提醒: 5h/7d 首次越过 80%/95% 时弹系统通知, 窗口重置后重新计."""
-        for label, pct, reset in windows:
+        """阈值提醒: 各限额按 cap 折算后首次越过 80%/95% 时弹系统通知, 窗口重置后重新计.
+
+        与进度条变红同口径: 5h/7d(cap=1) 即原始 80%/95%; Fable 等单模型周限
+        (weekly_scoped, cap=0.5) 折算后 80% = 原始 40% 就告警.
+        """
+        items = [(label, pct, reset, 1.0) for label, pct, reset in windows]
+        if self._api_full:
+            for name, pct, reset, _dur, group, cap in limit_rows(self._api_full):
+                if group != "session" and cap < 1:
+                    items.append((name, pct, reset, cap))
+        for label, pct, reset, cap in items:
+            eff = pct / cap
             prev_reset, prev_level = self._alert_state.get(label, (None, 0))
             if reset != prev_reset:
                 prev_level = 0
-            level = 95 if pct >= 95 else 80 if pct >= 80 else 0
+            level = 95 if eff >= 95 else 80 if eff >= 80 else 0
             if level > prev_level and self.tray_icon:
                 try:
                     self.tray_icon.notify(
-                        f"{label} 窗口用量已达 {round(pct)}%，"
+                        f"用量告急，天才程序员即将陨落！\n"
+                        f"{label} 已用 {round(pct)}%，"
                         f"{fmt_remain(reset)}后重置", "Claude 用量提醒")
                 except Exception:
                     pass
