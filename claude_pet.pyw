@@ -1,8 +1,8 @@
 """Claude Code 桌宠 — 读取 hook 写入的状态文件, 播放对应 GIF.
 
 状态映射:
-  working  -> 01  蚊香眼奋笔疾书
-  thinking -> 02  晕转思考
+  working  -> 02  晕转奋笔
+  thinking -> 01  蚊香眼思考
   done     -> 03  举本子炫耀 (10 秒后转 idle)
   waiting  -> 04  停笔等你
   error    -> 05  诶?
@@ -54,6 +54,22 @@ USAGE_API_POLL_S = 180      # 接口限流较狠, 官方 UA + 180s 是安全间�
 USAGE_API_FRESH_S = 600     # API 数据 10 分钟内算新鲜, 否则退回 statusline 文件
 CLAUDE_UA = "claude-code/2.1.220"
 
+# 自动更新: 对比远端 version.txt, 有新版则下载 zip 覆盖后自动重启
+VERSION_FILE = os.path.join(BASE, "version.txt")
+UPDATE_VER_URL = ("https://raw.githubusercontent.com/zzixxxx/"
+                  "ClaudePetLeiMi/main/version.txt")
+UPDATE_ZIP_URL = ("https://github.com/zzixxxx/ClaudePetLeiMi/"
+                  "archive/refs/heads/main.zip")
+UPDATE_CHECK_S = 24 * 3600
+
+
+def local_version():
+    try:
+        with open(VERSION_FILE, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return "0"
+
 ASSET_DIR = os.path.join(BASE, "assets")  # Impact.ttf 备而不用 (已回退)
 ICON_PNG = os.path.join(ASSET_DIR, "pet.png")  # 托盘/快捷方式图标
 UI_FONT = "Microsoft YaHei UI"  # 面板字体, 与右键菜单 (msyh.ttc) 一致
@@ -66,8 +82,8 @@ IDLE_TO_STANDBY_S = 180        # idle 超 3 分钟 -> standby(03)
 STALE_S = 15 * 60              # 状态文件太久没更新视为会话已死 -> idle
 
 STATE_GIF = {
-    "working": "01",
-    "thinking": "02",
+    "working": "02",
+    "thinking": "01",
     "done": "03",
     "waiting": "04",
     "error": "05",
@@ -345,6 +361,9 @@ class Pet:
             pass
         self._fetch_now = threading.Event()
         threading.Thread(target=self._api_loop, daemon=True).start()
+        # 自动更新: 开发目录(.git)跳过, 避免覆盖工作区
+        if not os.path.exists(os.path.join(BASE, ".git")):
+            threading.Thread(target=self._update_loop, daemon=True).start()
 
         self.display_state = "idle"
         self.frame_idx = 0
@@ -356,6 +375,97 @@ class Pet:
         self._animate()
         self._poll_state()
         self._poll_usage()
+
+    # ---------- 自动更新 ----------
+
+    def _update_loop(self):
+        time.sleep(60)
+        while True:
+            try:
+                self._check_update()
+            except Exception:
+                pass
+            time.sleep(UPDATE_CHECK_S)
+
+    def _check_update(self, manual=False):
+        """对比远端 version.txt; 有新版下载覆盖并重启. 返回是否触发了更新."""
+        req = urllib.request.Request(UPDATE_VER_URL,
+                                     headers={"User-Agent": "ClaudePetLeiMi"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            remote = r.read().decode("utf-8", "ignore").strip()
+        local = local_version()
+        if not remote or remote == local:
+            if manual and self.tray_icon:
+                self.tray_icon.notify(f"已是最新版本 v{local}", "ClaudePetLeiMi")
+            return False
+        import shutil
+        import subprocess
+        import tempfile
+        import zipfile
+        zpath = os.path.join(tempfile.gettempdir(), "ClaudePetLeiMi_upd.zip")
+        req = urllib.request.Request(UPDATE_ZIP_URL,
+                                     headers={"User-Agent": "ClaudePetLeiMi"})
+        with urllib.request.urlopen(req, timeout=120) as r, \
+                open(zpath, "wb") as f:
+            shutil.copyfileobj(r, f)
+        exdir = os.path.join(tempfile.gettempdir(), "ClaudePetLeiMi_upd")
+        shutil.rmtree(exdir, ignore_errors=True)
+        with zipfile.ZipFile(zpath) as z:
+            z.extractall(exdir)
+        shutil.copytree(os.path.join(exdir, "ClaudePetLeiMi-main"), BASE,
+                        dirs_exist_ok=True)
+        # 幂等重跑 hooks 合并 (新版本可能新增事件)
+        try:
+            subprocess.run([sys.executable,
+                            os.path.join(BASE, "install_hooks.py")],
+                           timeout=30)
+        except Exception:
+            pass
+        self.root.after(0, lambda: self._finish_update(remote))
+        return True
+
+    def _open_claude_desktop(self, new_chat=False):
+        """打开 Claude Desktop; new_chat=True 时新建对话 (托盘左键, 同 CD 托盘行为)."""
+        import subprocess
+        try:
+            os.startfile("claude://new" if new_chat else "claude://")
+            return
+        except OSError:
+            pass
+        try:  # 协议缺失时用商店应用 AUMID 兜底 (发布者哈希跨机器一致)
+            subprocess.Popen(
+                ["explorer.exe",
+                 r"shell:appsFolder\Claude_pzs8sxrjxfjjc!Claude"])
+        except Exception:
+            pass
+
+    def _manual_update(self):
+        def run():
+            try:
+                self._check_update(manual=True)
+            except Exception as e:
+                if self.tray_icon:
+                    try:
+                        self.tray_icon.notify(f"检查更新失败: {e}",
+                                              "ClaudePetLeiMi")
+                    except Exception:
+                        pass
+        threading.Thread(target=run, daemon=True).start()
+
+    def _finish_update(self, ver):
+        import subprocess
+        if self.tray_icon:
+            try:
+                self.tray_icon.notify(f"已更新到 v{ver}, 正在重启", "ClaudePetLeiMi")
+            except Exception:
+                pass
+        pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        if not os.path.exists(pythonw):
+            pythonw = sys.executable
+        DETACHED = 0x00000008 | 0x00000200
+        subprocess.Popen([pythonw, os.path.join(BASE, "claude_pet.pyw")],
+                         creationflags=DETACHED, close_fds=True, cwd=BASE)
+        # 新实例会按 pet.pid 顶替本进程
 
     def _api_loop(self):
         while True:
@@ -462,9 +572,12 @@ class Pet:
         self._close_menu()
         dark = self._system_dark()
         items = [
+            ("Show App", lambda: self._open_claude_desktop(False),
+             ""),
             ("用量详情", self._toggle_popup, ""),
             ("会话状态", self._toggle_sessions, ""),
             None,
+            ("检查更新", self._manual_update, ""),
             ("退出", self._quit, ""),
         ]
         try:
@@ -607,7 +720,8 @@ class Pet:
             def _on_notify(self, wparam, lparam):
                 WM_LBUTTONUP, WM_RBUTTONUP = 0x0202, 0x0205
                 if lparam == WM_LBUTTONUP:
-                    pet.root.after(0, pet._toggle_popup)
+                    # 同 Claude Desktop 托盘行为: 左键新建对话
+                    pet.root.after(0, lambda: pet._open_claude_desktop(True))
                 elif lparam == WM_RBUTTONUP:
                     pt = wintypes.POINT()
                     ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
@@ -649,6 +763,8 @@ class Pet:
         self.popup.configure(bg="#ffffff", highlightthickness=0)
         self.popup.bind("<Escape>", lambda e: self._close_popup())
         self._refresh_popup()
+        self._animate_in(self.popup)
+        self._bind_outside_close(self.popup, self._close_popup)
 
     # Claude Desktop Usage 页配色
     P_BG = "#ffffff"
@@ -883,6 +999,47 @@ class Pet:
             if win and win.winfo_exists():
                 self._position_popup(win)
 
+    def _animate_in(self, win):
+        """开面板入场动效: 从下方 12px 上滑到位 (与菜单一致, TB 风格)."""
+        win.update_idletasks()
+        x, y = win.winfo_x(), win.winfo_y()
+        steps = 8
+        win.geometry(f"+{x}+{y + 12}")
+
+        def anim(i=1):
+            if not win.winfo_exists():
+                return
+            t = i / steps
+            try:
+                win.geometry(f"+{x}+{y + int((1 - t) * 12)}")
+            except tk.TclError:
+                return
+            if i < steps:
+                win.after(14, lambda: anim(i + 1))
+
+        anim()
+
+    def _bind_outside_close(self, win, closer):
+        """点击面板/桌宠以外的区域(焦点丢失且指针不在两者内)时自动关闭."""
+        win.focus_force()
+
+        def on_focus_out(_e):
+            try:
+                px, py = win.winfo_pointerxy()
+            except tk.TclError:
+                return
+            for w in (self.root, win):
+                try:
+                    if (w.winfo_rootx() <= px < w.winfo_rootx() + w.winfo_width()
+                            and w.winfo_rooty() <= py
+                            < w.winfo_rooty() + w.winfo_height()):
+                        return
+                except tk.TclError:
+                    pass
+            closer()
+
+        win.bind("<FocusOut>", on_focus_out)
+
     # ---------- 会话状态面板 ----------
 
     def _toggle_sessions(self):
@@ -904,6 +1061,8 @@ class Pet:
         self.sess_popup.configure(bg=self.P_BG, highlightthickness=0)
         self.sess_popup.bind("<Escape>", lambda e: self._close_sessions())
         self._refresh_sessions()
+        self._animate_in(self.sess_popup)
+        self._bind_outside_close(self.sess_popup, self._close_sessions)
 
     @staticmethod
     def _read_sessions():

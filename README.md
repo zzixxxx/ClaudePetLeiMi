@@ -28,8 +28,8 @@ hooks；已有自定义 statusLine 时不覆盖）→ 创建开机自启与桌�
 
 | 状态 | GIF | 触发 |
 |---|---|---|
-| working 干活中 | 01 蚊香眼奋笔疾书 | PreToolUse |
-| thinking 思考中 | 02 晕转思考 | UserPromptSubmit / PostToolUse |
+| working 干活中 | 02 晕转奋笔 | PreToolUse |
+| thinking 思考中 | 01 蚊香眼思考 | UserPromptSubmit / PostToolUse |
 | done 完成 | 03 举本子炫耀 | Stop（展示 10 秒后转 idle）|
 | waiting 等你 | 04 停笔等待 | AskUserQuestion / 权限通知 |
 | error 出错 | 05 诶? | PostToolUseFailure |
@@ -97,14 +97,26 @@ hooks；已有自定义 statusLine 时不覆盖）→ 创建开机自启与桌�
   近全宽灰色分隔线(150,150,150,160)，悬停圆角高亮，上滑 10px 入场动效，跟随系统深浅色。
   **技术教训：真 DWM 亚克力（SetWindowCompositionAttribute）会把 tk 的 GDI 内容当全透明
   （文字消失），且 tk 的 -alpha 淡入（WS_EX_LAYERED）与 DWM 亚克力互斥——都别再试。**
-  托盘图标右键同样弹这个 flyout（子类化 pystray Icon._on_notify 接管 WM_RBUTTONUP），
-  托盘左键=开用量面板，tooltip 仅显示 ClaudePetLeiMi。
+  托盘图标右键同样弹这个 flyout（子类化 pystray Icon._on_notify 接管 WM_RBUTTONUP，
+  弹在点击点右上方），**托盘左键 = 新建 Claude Desktop 对话**（`claude://new` 协议，
+  缺协议时用商店应用 AUMID `Claude_pzs8sxrjxfjjc!Claude` 兜底），tooltip 仅显示 ClaudePetLeiMi。
+  托盘/快捷方式图标 = `assets/pet.ico`。
+- 菜单项：Show App（打开 Claude Desktop）/ 用量详情 / 会话状态 / 检查更新 / 退出，带 MDL2 图标。
+- 面板打开有上滑入场动效（与菜单一致）；**点击面板和桌宠以外的空白处自动关闭面板**。
 - 面板跟随桌宠拖动实时移动；用量面板与会话面板互斥（开一个关另一个）。
 - GIF 边缘：alpha 阈值 128 二值化（去品红键色混边）。曾试过 MinFilter 腐蚀收边去白圈，
   效果不佳已回退——GIF 边缘白圈是作者对白底烘焙的，腐蚀会啃掉描边，接受现状。
 - 调试参数：`claude_pet.pyw --popup` / `--sessions` / `--menu` 启动即开对应面板/菜单。
 - **用量拿不到数据时**：`python claude_pet.pyw --diag` 逐项检查凭证/接口/statusline/hooks 四环。
 - 用量面板行都挂在同一个共享 grid（col0 minsize 134），否则各行列宽独立算、进度条不对齐。
+
+## 自动更新
+
+- 版本锚点 = 仓库根 `version.txt`。桌宠启动 1 分钟后及此后每 24h 对比远端版本，
+  有新版自动：下载 main.zip → 覆盖安装目录 → 幂等重跑 install_hooks.py → 托盘通知 → 重启
+  （单实例顶替完成新旧交接）。右键菜单"检查更新"可手动触发。
+- 开发目录（含 .git）自动跳过，避免覆盖工作区。
+- **发版纪律：push 前必须 bump version.txt，否则用户收不到更新。**
 
 ## 操作
 
