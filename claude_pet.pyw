@@ -92,6 +92,28 @@ STATE_GIF = {
 }
 
 
+APP_AUMID = "ClaudePetLeiMi"
+APP_DISPLAY_NAME = "蕾米埃尔"
+
+
+def register_app_identity():
+    """让系统通知显示为"蕾米埃尔"而不是 python: 设置进程 AUMID 并注册显示名/图标."""
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_AUMID)
+        import winreg
+        key = winreg.CreateKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Classes\AppUserModelId" + "\\" + APP_AUMID)
+        winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ,
+                          APP_DISPLAY_NAME)
+        ico = os.path.join(ASSET_DIR, "pet.ico")
+        if os.path.exists(ico):
+            winreg.SetValueEx(key, "IconUri", 0, winreg.REG_SZ, ico)
+        winreg.CloseKey(key)
+    except Exception:
+        pass
+
+
 def replace_existing_instance():
     """顶替旧实例: 按 PID 文件找到上一个桌宠进程, 确认是 python 后结束它."""
     try:
@@ -395,8 +417,8 @@ class Pet:
             remote = r.read().decode("utf-8", "ignore").strip()
         local = local_version()
         if not remote or remote == local:
-            if manual and self.tray_icon:
-                self.tray_icon.notify(f"已是最新版本 v{local}", "ClaudePetLeiMi")
+            if manual:
+                self._notify(f"已是最新版本 v{local}")
             return False
         import shutil
         import subprocess
@@ -423,6 +445,43 @@ class Pet:
             pass
         self.root.after(0, lambda: self._finish_update(remote))
         return True
+
+    def _notify(self, message, title="ClaudePetLeiMi"):
+        """Windows Toast 通知. 归属名/图标来自注册的 AUMID (蕾米埃尔).
+
+        pystray 的旧式气泡通知归属名永远显示 Python, 不吃 AUMID, 所以走 WinRT.
+        """
+        import base64
+        import subprocess
+
+        def esc(s):
+            return (s.replace("&", "&amp;").replace("<", "&lt;")
+                    .replace(">", "&gt;").replace("'", "''"))
+
+        ps = (
+            "[Windows.UI.Notifications.ToastNotificationManager, "
+            "Windows.UI.Notifications, ContentType = WindowsRuntime] "
+            "| Out-Null\n"
+            "$xml = [Windows.UI.Notifications.ToastNotificationManager]::"
+            "GetTemplateContent([Windows.UI.Notifications."
+            "ToastTemplateType]::ToastText02)\n"
+            "$texts = $xml.GetElementsByTagName('text')\n"
+            f"$texts.Item(0).AppendChild($xml.CreateTextNode('{esc(title)}'))"
+            " | Out-Null\n"
+            f"$texts.Item(1).AppendChild($xml.CreateTextNode('{esc(message)}'))"
+            " | Out-Null\n"
+            "[Windows.UI.Notifications.ToastNotificationManager]::"
+            f"CreateToastNotifier('{APP_AUMID}').Show("
+            "[Windows.UI.Notifications.ToastNotification]::new($xml))\n"
+        )
+        try:
+            enc = base64.b64encode(ps.encode("utf-16-le")).decode()
+            CREATE_NO_WINDOW = 0x08000000
+            subprocess.Popen(
+                ["powershell", "-NoProfile", "-EncodedCommand", enc],
+                creationflags=CREATE_NO_WINDOW)
+        except Exception:
+            pass
 
     def _open_claude_desktop(self, new_chat=False):
         """打开 Claude Desktop; new_chat=True 时新建对话 (托盘左键, 同 CD 托盘行为)."""
@@ -509,21 +568,12 @@ class Pet:
             try:
                 self._check_update(manual=True)
             except Exception as e:
-                if self.tray_icon:
-                    try:
-                        self.tray_icon.notify(f"检查更新失败: {e}",
-                                              "ClaudePetLeiMi")
-                    except Exception:
-                        pass
+                self._notify(f"检查更新失败: {e}")
         threading.Thread(target=run, daemon=True).start()
 
     def _finish_update(self, ver):
         import subprocess
-        if self.tray_icon:
-            try:
-                self.tray_icon.notify(f"已更新到 v{ver}, 正在重启", "ClaudePetLeiMi")
-            except Exception:
-                pass
+        self._notify(f"已更新到 v{ver}, 正在重启")
         pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
         if not os.path.exists(pythonw):
             pythonw = sys.executable
@@ -566,15 +616,13 @@ class Pet:
             prev_reset, prev_level = self._alert_state.get(label, (None, 0))
             if reset != prev_reset:
                 prev_level = 0
-            level = 95 if eff >= 95 else 80 if eff >= 80 else 0
-            if level > prev_level and self.tray_icon:
-                try:
-                    self.tray_icon.notify(
-                        f"用量告急，天才程序员即将陨落！\n"
-                        f"{label} 已用 {round(pct)}%，"
-                        f"{fmt_remain(reset)}后重置", "Claude 用量提醒")
-                except Exception:
-                    pass
+            # 越过 80% 告警线后, 每 +5% 通知一次 (80/85/90/95/100)
+            level = int(eff // 5) * 5 if eff >= 80 else 0
+            if level > prev_level:
+                self._notify(
+                    f"用量告急，天才程序员即将陨落！\n"
+                    f"{label} 已用 {round(pct)}%，"
+                    f"{fmt_remain(reset)}后重置", "Claude 用量提醒")
             self._alert_state[label] = (reset, max(level, prev_level))
 
     # ---------- 窗口 ----------
@@ -1436,6 +1484,7 @@ if __name__ == "__main__":
     if "--diag" in sys.argv:
         run_diagnostics()
         sys.exit(0)
+    register_app_identity()
     replace_existing_instance()
     pet = Pet()
     if "--popup" in sys.argv:      # 调试: 启动即开用量面板
@@ -1445,4 +1494,8 @@ if __name__ == "__main__":
     if "--menu" in sys.argv:       # 调试: 启动即在桌宠左上弹菜单
         pet.root.after(1500, lambda: pet._show_menu(
             pet.root.winfo_x() - 40, pet.root.winfo_y() - 60))
+    if "--test-notify" in sys.argv:  # 调试: 发一条测试通知看归属名
+        pet.root.after(4000, lambda: pet._notify(
+            "用量告急，天才程序员即将陨落！\n5h 已用 83%，1h20m后重置",
+            "Claude 用量提醒"))
     pet.run()
