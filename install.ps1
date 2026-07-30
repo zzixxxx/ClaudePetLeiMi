@@ -1,4 +1,4 @@
-# ClaudePetLeiMi 一键安装脚本
+﻿# ClaudePetLeiMi 一键安装脚本
 # 用法 (PowerShell):
 #   irm https://raw.githubusercontent.com/zzixxxx/ClaudePetLeiMi/main/install.ps1 | iex
 $ErrorActionPreference = "Stop"

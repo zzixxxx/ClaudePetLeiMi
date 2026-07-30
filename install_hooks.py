@@ -29,9 +29,46 @@ def is_pet_hook(h):
     return "cc_pet_hook.py" in blob
 
 
+def save(path, cfg):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def remove(path):
+    """卸载: 移除本工具的 hooks 与 statusLine, 其余配置原样保留."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (FileNotFoundError, ValueError):
+        print("nothing to remove:", path)
+        return
+    hooks = cfg.get("hooks") or {}
+    for event in list(hooks):
+        groups = hooks[event]
+        for g in groups:
+            g["hooks"] = [h for h in g.get("hooks", []) if not is_pet_hook(h)]
+        hooks[event] = [g for g in groups if g.get("hooks")]
+        if not hooks[event]:
+            del hooks[event]
+    if not hooks and "hooks" in cfg:
+        del cfg["hooks"]
+    sl = cfg.get("statusLine") or {}
+    if "cc_statusline.py" in str(sl.get("command", "")):
+        del cfg["statusLine"]
+    save(path, cfg)
+    print("pet hooks/statusLine removed from:", path)
+
+
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    path = args[0] if args else os.path.join(
         os.path.expanduser("~"), ".claude", "settings.json")
+    if "--remove" in sys.argv:
+        remove(path)
+        return
     try:
         with open(path, encoding="utf-8") as f:
             cfg = json.load(f)
@@ -63,11 +100,7 @@ def main():
     else:
         print("statusLine: custom one detected, left untouched")
 
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    save(path, cfg)
     print("hooks written to:", path)
 
 
