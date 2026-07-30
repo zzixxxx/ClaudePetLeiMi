@@ -439,6 +439,26 @@ class Pet:
         except Exception:
             pass
 
+    def _uninstall(self):
+        """菜单"卸载": 二次确认后执行 uninstall.ps1 并退出."""
+        from tkinter import messagebox
+        if not messagebox.askyesno(
+                "卸载 ClaudePetLeiMi",
+                "确定要卸载吗？\n\n将移除 Claude Code hooks 配置、"
+                "开机自启、桌面快捷方式和程序文件。",
+                parent=self.root):
+            return
+        import subprocess
+        import tempfile
+        script = os.path.join(BASE, "uninstall.ps1")
+        if os.path.exists(script):
+            CREATE_NO_WINDOW = 0x08000000
+            subprocess.Popen(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-File", script],
+                cwd=tempfile.gettempdir(), creationflags=CREATE_NO_WINDOW)
+        self._quit()
+
     def _manual_update(self):
         def run():
             try:
@@ -578,6 +598,7 @@ class Pet:
             ("会话状态", self._toggle_sessions, ""),
             None,
             ("检查更新", self._manual_update, ""),
+            ("卸载", self._uninstall, ""),
             ("退出", self._quit, ""),
         ]
         try:
@@ -1174,16 +1195,21 @@ class Pet:
             tail = "\\".join(cwd.rstrip("\\").split("\\")[-2:]) if cwd else sid[:8]
             title, ctx = self._transcript_info(info.get("transcript"))
             full_name = title or tail
+            # 按像素宽度截断 (中文按字符数截会溢出单元格, 顶歪布局)
+            import tkinter.font as tkfont
+            name_font = tkfont.Font(family=UI_FONT, size=9)
             sess_name = full_name
-            if len(sess_name) > 16:
-                sess_name = sess_name[:16] + "…"
+            if name_font.measure(sess_name) > 150:
+                while sess_name and name_font.measure(sess_name + "…") > 150:
+                    sess_name = sess_name[:-1]
+                sess_name += "…"
             tk.Label(body, text="●", bg=bg, fg=color, font=(UI_FONT, 10)
                      ).grid(row=r, column=0, sticky="w", pady=(8, 0))
             tk.Label(body, text=verb, bg=bg, fg=fg, font=(UI_FONT, 10)
                      ).grid(row=r, column=1, sticky="w", padx=(6, 0),
                             pady=(8, 0))
             name_lbl = tk.Label(body, text=sess_name, bg=bg, fg=dim,
-                                font=(UI_FONT, 9))
+                                anchor="w", font=(UI_FONT, 9))
             name_lbl.grid(row=r, column=2, sticky="w", padx=(10, 12),
                           pady=(8, 0))
             if sess_name != full_name:
