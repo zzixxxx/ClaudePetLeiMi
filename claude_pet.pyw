@@ -663,6 +663,7 @@ class Pet:
         self.label.bind("<Double-Button-1>", lambda e: self._toggle_popup())
 
         self.ctx_menu = None
+        self.ctx_submenu = None
         self.label.bind("<Button-3>",
                         lambda e: self._show_menu(e.x_root, e.y_root))
 
@@ -681,45 +682,77 @@ class Pet:
         except Exception:
             return False
 
+    def _close_submenu(self):
+        if getattr(self, "ctx_submenu", None):
+            try:
+                self.ctx_submenu.destroy()
+            except tk.TclError:
+                pass
+            self.ctx_submenu = None
+
     def _close_menu(self):
+        self._close_submenu()
         if self.ctx_menu:
             self.ctx_menu.destroy()
             self.ctx_menu = None
 
     def _show_menu(self, x, y, prefer_up=False):
-        """仿亚克力 flyout: 截取背景 -> 高斯模糊+主题色调 -> PIL 画圆角卡片/文字.
-
-        真 DWM 亚克力会把 GDI 内容当全透明 (tk 文字消失), 且圆角 region 无抗锯齿,
-        所以整张菜单用 PIL 渲染: 圆角/描边/悬停态全部 AA, 四角外是真实背景截图.
-        prefer_up: 菜单弹在点击点右上方 (托盘用).
-        """
+        """主菜单. "高级" 带子菜单 (TTB 同款, 卸载收纳其中), 上下有分隔线."""
         self._close_menu()
-        dark = self._system_dark()
+        adv_items = [
+            ("卸载", self._uninstall, "", None),
+        ]
         items = [
             ("Show App", lambda: self._open_claude_desktop(False),
-             ""),
-            ("用量详情", self._toggle_popup, ""),
-            ("会话状态", self._toggle_sessions, ""),
+             "", None),
+            ("用量详情", self._toggle_popup, "", None),
+            ("会话状态", self._toggle_sessions, "", None),
             None,
-            ("检查更新", self._manual_update, ""),
-            ("卸载", self._uninstall, ""),
-            ("退出", self._quit, ""),
+            ("高级", None, "", adv_items),
+            None,
+            ("检查更新", self._manual_update, "", None),
+            ("退出", self._quit, "", None),
         ]
+        self.ctx_menu = self._flyout(x, y, items, prefer_up=prefer_up,
+                                     main=True)
+
+    def _open_submenu(self, parent, subitems, row_y0):
+        """在父菜单行右侧展开子菜单 (右侧放不下换左侧)."""
+        if (getattr(self, "ctx_submenu", None)
+                and self.ctx_submenu.winfo_exists()):
+            return
+        sub_w = 190
+        px = parent.winfo_x() + parent.winfo_width() - 6
+        py = parent.winfo_y() + row_y0 - 6
+        if px + sub_w > self.root.winfo_screenwidth() - 8:
+            px = parent.winfo_x() - sub_w + 6
+        self.ctx_submenu = self._flyout(px, py, subitems, main=False)
+
+    def _flyout(self, x, y, items, prefer_up=False, main=True):
+        """仿亚克力 flyout 渲染器, 主菜单与子菜单共用.
+
+        items: (文本, 回调, MDL2图标, 子菜单items或None), None=分隔线.
+        真 DWM 亚克力会把 GDI 内容当全透明 (tk 文字消失), 且圆角 region 无抗锯齿,
+        所以整张菜单用 PIL 渲染: 圆角/描边/悬停态全部 AA, 四角外是真实背景截图.
+        prefer_up: 弹在点击点右上方 (托盘用). main=False 为子菜单(不抢焦点).
+        """
+        dark = self._system_dark()
         try:
             # Microsoft YaHei UI (msyh.ttc index 1), Win11 菜单同源字体
             font = ImageFont.truetype("msyh.ttc", 14, index=1)
             icon_font = ImageFont.truetype("segmdl2.ttf", 15)
+            chev_font = ImageFont.truetype("segmdl2.ttf", 10)
         except OSError:
-            font = icon_font = ImageFont.load_default()
+            font = icon_font = chev_font = ImageFont.load_default()
         row_h, sep_h, pad_v, pad_x, radius = 36, 9, 6, 14, 8
         text_x = pad_x + 15 + 12  # 图标列之后
         w = 190
         h = pad_v * 2 + sum(sep_h if it is None else row_h for it in items)
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
         x = max(8, min(x, sw - w - 8))
-        if prefer_up or y + h > sh - 48:
+        if main and (prefer_up or y + h > sh - 48):
             y = y - h - 4
-        y = max(8, y)
+        y = max(8, min(y, sh - h - 48))
 
         try:
             shot = ImageGrab.grab(bbox=(x, y, x + w, y + h)).convert("RGBA")
@@ -747,23 +780,24 @@ class Pet:
         # 分隔线: 浅灰色
         sep_c = (205, 205, 205, 180)
         hover_c = (255, 255, 255, 28) if dark else (0, 0, 0, 20)
-        clickable = []  # (y0, y1, callback, hover序号)
-        layout = []     # (kind, ...)
+        clickable = []  # (y0, y1, callback, hover序号, 子菜单items)
+        layout = []     # ("sep", y) / ("item", y0, 文本, 序号, 图标, 有无子菜单)
         cy, idx = pad_v, 0
         for it in items:
             if it is None:
                 layout.append(("sep", cy + sep_h // 2))
                 cy += sep_h
             else:
-                layout.append(("item", cy, it[0], idx, it[2]))
-                clickable.append((cy, cy + row_h, it[1], idx))
+                sub = it[3] if len(it) > 3 else None
+                layout.append(("item", cy, it[0], idx, it[2], sub is not None))
+                clickable.append((cy, cy + row_h, it[1], idx, sub))
                 cy += row_h
                 idx += 1
 
         def render(hover_idx):
             img = base.copy()
             if hover_idx >= 0:
-                for y0, y1, _cb, i in clickable:
+                for y0, y1, _cb, i, _s in clickable:
                     if i == hover_idx:
                         hov = Image.new("RGBA", (w, h), (0, 0, 0, 0))
                         ImageDraw.Draw(hov).rounded_rectangle(
@@ -779,32 +813,45 @@ class Pet:
                            anchor="lm")
                     d.text((text_x, mid), entry[2], font=font, fill=fg,
                            anchor="lm")
+                    if entry[5]:  # 子菜单箭头
+                        d.text((w - 12, mid), "", font=chev_font,
+                               fill=fg, anchor="rm")
             return ImageTk.PhotoImage(img.convert("RGB"))
 
         photos = {-1: render(-1)}
-        for _y0, _y1, _cb, i in clickable:
+        for _y0, _y1, _cb, i, _s in clickable:
             photos[i] = render(i)
-        self._menu_photos = photos
 
         m = tk.Toplevel(self.root)
-        self.ctx_menu = m
+        m._photos = photos  # 持引用防 GC (主/子菜单各自持有)
         m.overrideredirect(True)
         m.attributes("-topmost", True)
         lbl = tk.Label(m, image=photos[-1], bd=0, highlightthickness=0)
         lbl.pack()
 
         def row_at(ey):
-            for y0, y1, cb, i in clickable:
+            for y0, y1, cb, i, sub in clickable:
                 if y0 <= ey < y1:
-                    return cb, i
-            return None, -1
+                    return cb, i, sub, y0
+            return None, -1, None, 0
 
-        lbl.bind("<Motion>",
-                 lambda e: lbl.configure(image=photos[row_at(e.y)[1]]))
+        def on_motion(e):
+            cb, i, sub, y0 = row_at(e.y)
+            lbl.configure(image=photos[i])
+            if main:
+                if sub is not None:
+                    self._open_submenu(m, sub, y0)
+                elif i >= 0:
+                    self._close_submenu()
+
+        lbl.bind("<Motion>", on_motion)
         lbl.bind("<Leave>", lambda e: lbl.configure(image=photos[-1]))
 
         def on_click(e):
-            cb, _ = row_at(e.y)
+            cb, _i, sub, y0 = row_at(e.y)
+            if sub is not None:
+                self._open_submenu(m, sub, y0)
+                return
             self._close_menu()
             if cb:
                 cb()
@@ -812,11 +859,27 @@ class Pet:
 
         m.geometry(f"{w}x{h}+{x}+{y + 10}")
 
+        def _inside(wnd, px, py):
+            try:
+                return (wnd.winfo_rootx() <= px
+                        < wnd.winfo_rootx() + wnd.winfo_width()
+                        and wnd.winfo_rooty() <= py
+                        < wnd.winfo_rooty() + wnd.winfo_height())
+            except tk.TclError:
+                return False
+
+        def on_focus_out(_e):
+            px, py = m.winfo_pointerxy()
+            for wnd in (self.ctx_menu, self.ctx_submenu):
+                if wnd and wnd.winfo_exists() and _inside(wnd, px, py):
+                    return
+            self._close_menu()
+
         # 入场动效: 上滑 10px 约 110ms
         steps = 8
 
         def _anim(i=1):
-            if not (self.ctx_menu is m and m.winfo_exists()):
+            if not m.winfo_exists():
                 return
             t = i / steps
             try:
@@ -825,12 +888,13 @@ class Pet:
                 return
             if i < steps:
                 m.after(14, lambda: _anim(i + 1))
-            else:
+            elif main:
                 m.focus_force()
-                m.bind("<FocusOut>", lambda e: self._close_menu())
+                m.bind("<FocusOut>", on_focus_out)
 
         m.bind("<Escape>", lambda e: self._close_menu())
         _anim()
+        return m
 
     # ---------- 托盘徽章 ----------
 
