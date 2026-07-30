@@ -1,6 +1,6 @@
 # ClaudePetLeiMi — Claude Code 状态桌宠
 
-桌面上的小爱莉希雅，实时演出你的 Claude Code 工作状态，顺便帮你盯着用量。
+桌面上的小蕾米埃尔，实时演出你的 Claude Code 工作状态，顺便帮你盯着用量。
 
 ## 功能
 
