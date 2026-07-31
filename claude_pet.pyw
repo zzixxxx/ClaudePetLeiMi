@@ -366,6 +366,7 @@ class Pet:
         self._api_full = None
         self._api_ts = 0.0
         self._alert_state = {}
+        self.notify_alerts = True  # 用量告警通知开关 (高级菜单可关, 持久化)
         self.popup = None
         self.sess_popup = None
         self._popup_imgs = []
@@ -618,7 +619,7 @@ class Pet:
                 prev_level = 0
             # 越过 80% 告警线后, 每 +5% 通知一次 (80/85/90/95/100)
             level = int(eff // 5) * 5 if eff >= 80 else 0
-            if level > prev_level:
+            if level > prev_level and self.notify_alerts:
                 self._notify(
                     f"用量告急，天才程序员即将陨落！\n"
                     f"{label} 已用 {round(pct)}%，"
@@ -633,6 +634,7 @@ class Pet:
             with open(CFG_FILE, encoding="utf-8") as f:
                 cfg = json.load(f)
             x, y = cfg.get("x"), cfg.get("y")
+            self.notify_alerts = cfg.get("notify_alerts", True)
         except Exception:
             pass
         if x is None or y is None:
@@ -644,9 +646,14 @@ class Pet:
     def _save_cfg(self):
         try:
             with open(CFG_FILE, "w", encoding="utf-8") as f:
-                json.dump({"x": self.root.winfo_x(), "y": self.root.winfo_y()}, f)
+                json.dump({"x": self.root.winfo_x(), "y": self.root.winfo_y(),
+                           "notify_alerts": self.notify_alerts}, f)
         except OSError:
             pass
+
+    def _toggle_notify(self):
+        self.notify_alerts = not self.notify_alerts
+        self._save_cfg()
 
     def _quit(self):
         if self.tray_icon:
@@ -700,6 +707,9 @@ class Pet:
         """主菜单. "高级" 带子菜单 (TTB 同款, 卸载收纳其中), 上下有分隔线."""
         self._close_menu()
         adv_items = [
+            # 开启时前面带勾 (TTB 开机自启 同款样式)
+            ("开启通知", self._toggle_notify,
+             "" if self.notify_alerts else "", None),
             ("卸载", self._uninstall, "", None),
         ]
         items = [
