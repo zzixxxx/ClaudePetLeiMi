@@ -308,10 +308,11 @@ def limit_rows(data):
         else:
             name = f"{kind} {model}".strip()
         duration = 5 * 3600 if group == "session" else 7 * 86400
-        # weekly_scoped (单模型周限) 的上限是总周限的 50%, 进度条总量按 0.5 折算
-        cap = 0.5 if kind == "weekly_scoped" else 1.0
+        # percent 已按该限额自身配额归一化为 0-100 (实测 Fable 70% 时
+        # weekly_all 才 36%, 若是全局口径不可能倒挂), 不做任何折算
         rows.append((name, float(lim["percent"]),
-                     _parse_reset(lim.get("resets_at")), duration, group, cap))
+                     _parse_reset(lim.get("resets_at")), duration, group,
+                     bool(lim.get("is_active"))))
     return rows
 
 
@@ -395,6 +396,7 @@ class Pet:
         self._place_window()
         self._bind_events()
         self._start_tray()
+        self._install_click_hook()
         self._animate()
         self._poll_state()
         self._poll_usage()
@@ -598,27 +600,49 @@ class Pet:
             self._fetch_now.clear()
 
     def _force_refresh(self):
+        """手动刷新: 立即触发 API 抓取, 面板显示 Refreshing…, 数据到达后重绘."""
+        ts0 = self._api_ts
         self._fetch_now.set()
-        self.root.after(2500, self._refresh_popup)
+        lbl = getattr(self, "_upd_label", None)
+        if lbl and lbl.winfo_exists():
+            try:
+                lbl.configure(text="Refreshing…")
+            except tk.TclError:
+                pass
+
+        def poll(n=0):
+            if not (self.popup and self.popup.winfo_exists()):
+                return
+            if self._api_ts != ts0 or n >= 40:  # 数据到达或超时 20s
+                self._refresh_popup()
+                return
+            self.root.after(500, lambda: poll(n + 1))
+
+        self.root.after(500, poll)
 
     def _check_alerts(self, windows):
-        """阈值提醒: 各限额按 cap 折算后首次越过 80%/95% 时弹系统通知, 窗口重置后重新计.
+        """阈值提醒: percent 即各限额自身占比, 首次越过 80% 后每 +5% 通知一次.
 
-        与进度条变红同口径: 5h/7d(cap=1) 即原始 80%/95%; Fable 等单模型周限
-        (weekly_scoped, cap=0.5) 折算后 80% = 原始 40% 就告警.
+        5h/7d 来自 windows; 单模型周限 (weekly_scoped, 如 Fable) 从 limits
+        数组补进来, 同口径按原始 percent 告警.
         """
-        items = [(label, pct, reset, 1.0) for label, pct, reset in windows]
+        items = [(label, pct, reset) for label, pct, reset in windows]
         if self._api_full:
-            for name, pct, reset, _dur, group, cap in limit_rows(self._api_full):
-                if group != "session" and cap < 1:
-                    items.append((name, pct, reset, cap))
-        for label, pct, reset, cap in items:
-            eff = pct / cap
+            for lim in self._api_full.get("limits") or []:
+                if (lim.get("kind") == "weekly_scoped"
+                        and lim.get("percent") is not None):
+                    scope = lim.get("scope") or {}
+                    model = scope.get("model") if isinstance(scope, dict) else None
+                    mname = (model.get("display_name")
+                             if isinstance(model, dict) else None)
+                    items.append((mname or "scoped", float(lim["percent"]),
+                                  _parse_reset(lim.get("resets_at"))))
+        for label, pct, reset in items:
             prev_reset, prev_level = self._alert_state.get(label, (None, 0))
             if reset != prev_reset:
                 prev_level = 0
             # 越过 80% 告警线后, 每 +5% 通知一次 (80/85/90/95/100)
-            level = int(eff // 5) * 5 if eff >= 80 else 0
+            level = int(pct // 5) * 5 if pct >= 80 else 0
             if level > prev_level and self.notify_alerts:
                 self._notify(
                     f"用量告急，天才程序员即将陨落！\n"
@@ -904,6 +928,9 @@ class Pet:
 
         m.bind("<Escape>", lambda e: self._close_menu())
         _anim()
+        if main:
+            # FocusOut 受前台锁限制不可靠, 用轮询点外关闭兜底
+            self._bind_outside_close(m, self._close_menu)
         return m
 
     # ---------- 托盘徽章 ----------
@@ -995,18 +1022,19 @@ class Pet:
         (self._popup_imgs if store is None else store).append(photo)
         return tk.Label(parent, image=photo, bg=self.P_BG, bd=0)
 
-    def _limit_row(self, body, name, sub, pct, cap=1.0):
+    def _limit_row(self, body, name, sub, pct, active=False):
         """在共享网格 body 里追加一条限额行 (共享列宽, 进度条纵向对齐).
 
-        cap: 该限额上限占总量比例 (weekly_scoped=0.5), 条的填充按 cap 折算;
-        折算后 >=80% 变红, 否则统一蓝色.
+        percent 即该限额自身的 0-100, >=80% 变红否则蓝色;
+        active=True (API is_active, 当前起约束的限额) 时名称加粗.
         """
         bg = self.P_BG
         r = self._grid_row
-        frac = pct / 100 / cap
+        frac = pct / 100
+        name_font = (UI_FONT, 10, "bold") if active else (UI_FONT, 10)
         tk.Label(body, text=name, bg=bg, fg=self.P_FG, anchor="w",
-                 font=(UI_FONT, 10)).grid(row=r, column=0, sticky="w",
-                                          pady=(8, 0))
+                 font=name_font).grid(row=r, column=0, sticky="w",
+                                      pady=(8, 0))
         tk.Label(body, text=sub, bg=bg, fg=self.P_DIM, anchor="w",
                  font=(UI_FONT, 9)).grid(row=r + 1, column=0, sticky="w")
         self._draw_bar(body, frac, frac >= 0.8).grid(
@@ -1055,8 +1083,8 @@ class Pet:
         body.grid_columnconfigure(1, weight=1)
         self._grid_row = 0
 
-        for name, pct, reset, duration, _g, cap in session_rows:
-            self._limit_row(body, name, fmt_resets_in(reset), pct, cap)
+        for name, pct, reset, duration, _g, active in session_rows:
+            self._limit_row(body, name, fmt_resets_in(reset), pct, active)
 
         if weekly_rows:
             tk.Label(body, text="Weekly limits", bg=bg, fg=fg,
@@ -1064,9 +1092,9 @@ class Pet:
                 row=self._grid_row, column=0, columnspan=3, sticky="w",
                 pady=(16, 0))
             self._grid_row += 1
-            for name, pct, reset, duration, _g, cap in weekly_rows:
+            for name, pct, reset, duration, _g, active in weekly_rows:
                 self._limit_row(body, name, fmt_resets_weekday(reset), pct,
-                                cap)
+                                active)
 
         extra = (data or {}).get("extra_usage") or {}
         if extra.get("is_enabled") and extra.get("used_credits") is not None:
@@ -1080,11 +1108,16 @@ class Pet:
                      bg=bg, fg=dim, font=(UI_FONT, 9)).pack(side="right")
 
         foot = tk.Frame(self.popup, bg=bg)
-        foot.pack(fill="x", padx=20, pady=(14, 12))
-        tk.Label(foot, text=f"Last updated: {fmt_ago(self._api_ts)}", bg=bg,
-                 fg=dim, font=(UI_FONT, 9)).pack(side="left")
-        refresh = tk.Label(foot, text=" ⟳", bg=bg, fg=dim, font=(UI_FONT, 10))
-        refresh.pack(side="left")
+        foot.pack(fill="x", padx=20, pady=(12, 10))
+        self._upd_label = tk.Label(
+            foot, text=f"Last updated: {fmt_ago(self._api_ts)}", bg=bg,
+            fg=dim, font=(UI_FONT, 9))
+        self._upd_label.pack(side="left")
+        refresh = tk.Label(foot, text="", bg=bg, fg=dim, cursor="hand2",
+                           font=("Segoe MDL2 Assets", 11), padx=6, pady=2)
+        refresh.pack(side="left", padx=(4, 0))
+        refresh.bind("<Enter>", lambda e: refresh.configure(fg=self.P_FG))
+        refresh.bind("<Leave>", lambda e: refresh.configure(fg=dim))
         refresh.bind("<Button-1>", lambda e: self._force_refresh())
 
         self._position_popup(self.popup)
@@ -1218,28 +1251,95 @@ class Pet:
 
         anim()
 
+    @staticmethod
+    def _pt_inside(w, px, py):
+        try:
+            return (w.winfo_rootx() <= px < w.winfo_rootx() + w.winfo_width()
+                    and w.winfo_rooty() <= py
+                    < w.winfo_rooty() + w.winfo_height())
+        except tk.TclError:
+            return False
+
     def _bind_outside_close(self, win, closer):
-        """点击面板/桌宠以外的区域(焦点丢失且指针不在两者内)时自动关闭."""
-        win.focus_force()
+        """点击面板/桌宠以外的区域时自动关闭.
 
-        def on_focus_out(_e):
-            try:
-                px, py = win.winfo_pointerxy()
-            except tk.TclError:
+        不能依赖 FocusOut: overrideredirect 窗口的 focus_force 受 Windows
+        前台锁限制经常失败, FocusOut 永不触发. 改为轮询鼠标按下+指针位置.
+        """
+        try:
+            win.focus_force()  # 尽力而为, Esc 关闭需要焦点
+        except tk.TclError:
+            pass
+        # 点外关闭由全局 WH_MOUSE_LL 钩子统一处理 (_install_click_hook)
+
+    def _install_click_hook(self):
+        """全局 WH_MOUSE_LL 鼠标钩子: 点外即关所有弹层.
+
+        GetAsyncKeyState 轮询(0x8000 漏瞬时点击, LSB 全系统共享被清位)与
+        FocusOut(前台锁) 都不可靠. 钩子必须装在专用线程(自带消息泵),
+        回调只写坐标标记, 绝不碰 tk —— 在 tk 主线程装钩子会在 Tcl 释放
+        GIL 的窗口期回调, 直接 PyEval_RestoreThread 致命崩溃.
+        """
+        self._pending_click = None  # (x, y), 钩子线程写 / tk 轮询消费
+
+        class MSLLHOOKSTRUCT(ctypes.Structure):
+            _fields_ = [("pt", wintypes.POINT),
+                        ("mouseData", wintypes.DWORD),
+                        ("flags", wintypes.DWORD),
+                        ("time", wintypes.DWORD),
+                        ("dwExtraInfo", ctypes.c_size_t)]
+
+        def hook_thread():
+            WH_MOUSE_LL = 14
+            WM_L, WM_R = 0x0201, 0x0204
+            HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int,
+                                          wintypes.WPARAM, wintypes.LPARAM)
+            u = ctypes.windll.user32
+            u.SetWindowsHookExW.restype = ctypes.c_void_p
+            u.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC,
+                                            ctypes.c_void_p, wintypes.DWORD]
+            u.CallNextHookEx.restype = ctypes.c_ssize_t
+            u.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                         wintypes.WPARAM, wintypes.LPARAM]
+
+            def cb(n_code, w_param, l_param):
+                if n_code >= 0 and w_param in (WM_L, WM_R):
+                    ms = ctypes.cast(
+                        l_param, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+                    self._pending_click = (ms.pt.x, ms.pt.y)
+                return u.CallNextHookEx(None, n_code, w_param, l_param)
+
+            cb_ref = HOOKPROC(cb)
+            self._click_hook_cb = cb_ref  # 持引用防 GC
+            self._click_hook = u.SetWindowsHookExW(WH_MOUSE_LL, cb_ref,
+                                                   None, 0)
+            msg = wintypes.MSG()
+            while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                u.TranslateMessage(ctypes.byref(msg))
+                u.DispatchMessageW(ctypes.byref(msg))
+
+        threading.Thread(target=hook_thread, daemon=True).start()
+        self._watch_outside_clicks()
+
+    def _watch_outside_clicks(self):
+        click = self._pending_click
+        if click is not None:
+            self._pending_click = None
+            self._handle_outside_click(*click)
+        self.root.after(100, self._watch_outside_clicks)
+
+    def _handle_outside_click(self, px, py):
+        """鼠标按下坐标不在桌宠/面板/菜单内 -> 关闭所有弹层."""
+        popups = [w for w in (self.popup, self.sess_popup, self.ctx_menu,
+                              self.ctx_submenu) if w and w.winfo_exists()]
+        if not popups:
+            return
+        for w in popups + [self.root]:
+            if self._pt_inside(w, px, py):
                 return
-            for w in (self.root, win):
-                try:
-                    if (w.winfo_rootx() <= px < w.winfo_rootx() + w.winfo_width()
-                            and w.winfo_rooty() <= py
-                            < w.winfo_rooty() + w.winfo_height()):
-                        return
-                except tk.TclError:
-                    pass
-            closer()
-
-        win.bind("<FocusOut>", on_focus_out)
-
-    # ---------- 会话状态面板 ----------
+        self._close_popup()
+        self._close_sessions()
+        self._close_menu()
 
     def _toggle_sessions(self):
         if self.sess_popup and self.sess_popup.winfo_exists():
