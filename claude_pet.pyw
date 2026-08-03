@@ -747,6 +747,7 @@ class Pet:
             ("检查更新", self._manual_update, "", None),
             ("退出", self._quit, "", None),
         ]
+        self._popover_opened = time.monotonic()
         self.ctx_menu = self._flyout(x, y, items, prefer_up=prefer_up,
                                      main=True)
 
@@ -987,6 +988,7 @@ class Pet:
         self.popup.attributes("-topmost", True)
         self.popup.configure(bg="#ffffff", highlightthickness=0)
         self.popup.bind("<Escape>", lambda e: self._close_popup())
+        self._popover_opened = time.monotonic()
         self._refresh_popup()
         self._animate_in(self.popup)
         self._bind_outside_close(self.popup, self._close_popup)
@@ -1355,7 +1357,7 @@ class Pet:
                 if n_code >= 0 and w_param in (WM_L, WM_R):
                     ms = ctypes.cast(
                         l_param, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
-                    self._pending_click = (ms.pt.x, ms.pt.y)
+                    self._pending_click = (ms.pt.x, ms.pt.y, time.monotonic())
                 return u.CallNextHookEx(None, n_code, w_param, l_param)
 
             cb_ref = HOOKPROC(cb)
@@ -1377,8 +1379,15 @@ class Pet:
             self._handle_outside_click(*click)
         self.root.after(100, self._watch_outside_clicks)
 
-    def _handle_outside_click(self, px, py):
-        """鼠标按下坐标不在桌宠/面板/菜单内 -> 关闭所有弹层."""
+    def _handle_outside_click(self, px, py, ts):
+        """鼠标按下坐标不在桌宠/面板/菜单内 -> 关闭所有弹层.
+
+        打开弹层的那次点击本身也会被钩子记录 (经由菜单点开面板时坐标
+        多半不在新面板内), 不过滤会把刚开的面板秒关 -> 按时间戳忽略
+        早于最近一次弹层打开的点击.
+        """
+        if ts <= getattr(self, "_popover_opened", 0) + 0.05:
+            return
         popups = [w for w in (self.popup, self.sess_popup, self.ctx_menu,
                               self.ctx_submenu) if w and w.winfo_exists()]
         if not popups:
@@ -1408,6 +1417,7 @@ class Pet:
         self.sess_popup.attributes("-topmost", True)
         self.sess_popup.configure(bg=self.P_BG, highlightthickness=0)
         self.sess_popup.bind("<Escape>", lambda e: self._close_sessions())
+        self._popover_opened = time.monotonic()
         self._refresh_sessions()
         self._animate_in(self.sess_popup)
         self._bind_outside_close(self.sess_popup, self._close_sessions)
@@ -1715,6 +1725,26 @@ if __name__ == "__main__":
     if "--menu" in sys.argv:       # 调试: 启动即在桌宠左上弹菜单
         pet.root.after(1500, lambda: pet._show_menu(
             pet.root.winfo_x() - 40, pet.root.winfo_y() - 60))
+    if "--selftest-outside" in sys.argv:  # 调试: 点外关闭链路自测
+        def _st_open():
+            pet._open_popup()
+
+            def _st_inject():
+                px = pet.root.winfo_x() - 300
+                py = pet.root.winfo_y() - 300
+                pet._pending_click = (px, py, time.monotonic())
+
+                def _st_check():
+                    ok = not (pet.popup and pet.popup.winfo_exists())
+                    print("SELFTEST outside-close:",
+                          "PASS" if ok else "FAIL", flush=True)
+                    pet.root.destroy()
+
+                pet.root.after(600, _st_check)
+
+            pet.root.after(1500, _st_inject)
+
+        pet.root.after(1200, _st_open)
     if "--test-notify" in sys.argv:  # 调试: 发一条测试通知看归属名
         pet.root.after(4000, lambda: pet._notify(
             "用量告急，天才程序员即将陨落！\n5h 已用 83%，1h20m后重置",
