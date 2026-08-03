@@ -860,6 +860,7 @@ class Pet:
         m._photos = photos  # 持引用防 GC (主/子菜单各自持有)
         m.overrideredirect(True)
         m.attributes("-topmost", True)
+        m.attributes("-toolwindow", True)
         lbl = tk.Label(m, image=photos[-1], bd=0, highlightthickness=0)
         lbl.pack()
 
@@ -968,6 +969,7 @@ class Pet:
         self.popup = tk.Toplevel(self.root)
         self.popup.overrideredirect(True)
         self.popup.attributes("-topmost", True)
+        self.popup.attributes("-toolwindow", True)  # -alpha 会让无边框窗口出现任务栏按钮
         self.popup.configure(bg="#ffffff", highlightthickness=0)
         self.popup.bind("<Escape>", lambda e: self._close_popup())
         self._popover_opened = time.monotonic()
@@ -1174,6 +1176,7 @@ class Pet:
             t = tk.Toplevel(widget)
             t.overrideredirect(True)
             t.attributes("-topmost", True)
+            t.attributes("-toolwindow", True)
             tk.Label(t, text=text, bg="#333333", fg="#ffffff",
                      font=(UI_FONT, 9), padx=8, pady=3).pack()
             t.geometry(f"+{e.x_root + 12}+{e.y_root + 16}")
@@ -1409,6 +1412,7 @@ class Pet:
         self.sess_popup = tk.Toplevel(self.root)
         self.sess_popup.overrideredirect(True)
         self.sess_popup.attributes("-topmost", True)
+        self.sess_popup.attributes("-toolwindow", True)
         self.sess_popup.configure(bg=self.P_BG, highlightthickness=0)
         self.sess_popup.bind("<Escape>", lambda e: self._close_sessions())
         self._popover_opened = time.monotonic()
