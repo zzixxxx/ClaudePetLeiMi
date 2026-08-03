@@ -758,7 +758,9 @@ class Pet:
         sub_w = 190
         px = parent.winfo_x() + parent.winfo_width() - 6
         py = parent.winfo_y() + row_y0 - 6
-        if px + sub_w > self.root.winfo_screenwidth() - 8:
+        _ml, _mt, mr, _mb = self._monitor_work_area(parent.winfo_x() + 10,
+                                                    parent.winfo_y() + 10)
+        if px + sub_w > mr - 8:
             px = parent.winfo_x() - sub_w + 6
         self.ctx_submenu = self._flyout(px, py, subitems, main=False)
 
@@ -782,16 +784,13 @@ class Pet:
         text_x = pad_x + 15 + 12  # 图标列之后
         w = 190
         h = pad_v * 2 + sum(sep_h if it is None else row_h for it in items)
-        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        x = max(8, min(x, sw - w - 8))
-        if main and (prefer_up or y + h > sh - 48):
+        ml, mt, mr, mb = self._monitor_work_area(x, y)
+        x = max(ml + 8, min(x, mr - w - 8))
+        if main and (prefer_up or y + h > mb - 8):
             y = y - h - 4
-        y = max(8, min(y, sh - h - 48))
+        y = max(mt + 8, min(y, mb - h - 8))
 
-        try:
-            shot = ImageGrab.grab(bbox=(x, y, x + w, y + h)).convert("RGBA")
-        except Exception:
-            shot = Image.new("RGBA", (w, h), "#808080")
+        shot = self._grab_screen(x, y, w, h)
         glass = shot.filter(ImageFilter.GaussianBlur(14))
         tint = (32, 32, 32, 208) if dark else (243, 243, 243, 208)
         glass = Image.alpha_composite(glass, Image.new("RGBA", (w, h), tint))
@@ -1205,19 +1204,19 @@ class Pet:
         widget.bind("<Leave>", hide)
 
     def _position_popup(self, win):
-        """定位到桌宠正上方, 永不遮挡; 顶部放不下就挪下方/侧面. 并裁圆角."""
+        """定位到桌宠正上方 (跟随其所在显示器), 永不遮挡; 放不下挪下方/侧面."""
         win.update_idletasks()
         w, h = self.PANEL_W, win.winfo_reqheight()
-        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
         px, py = self.root.winfo_x(), self.root.winfo_y()
         pw, ph = self.root.winfo_width(), self.root.winfo_height()
-        x = min(max(8, px + pw - w), sw - w - 8)
+        ml, mt, mr, mb = self._monitor_work_area(px + pw // 2, py + ph // 2)
+        x = min(max(ml + 8, px + pw - w), mr - w - 8)
         y = py - h - 8
-        if y < 8:
+        if y < mt + 8:
             y = py + ph + 8
-        if y + h > sh - 48:
-            x = px - w - 8 if px - w - 8 > 8 else px + pw + 8
-            y = min(max(8, py), sh - h - 48)
+        if y + h > mb - 8:
+            x = px - w - 8 if px - w - 8 > ml + 8 else px + pw + 8
+            y = min(max(mt + 8, py), mb - h - 8)
         win.geometry(f"{w}x{h}+{x}+{y}")
         win.update_idletasks()
         self._round_corners(win, w, h)
@@ -1248,6 +1247,48 @@ class Pet:
                 win.after(14, lambda: anim(i + 1))
 
         anim()
+
+    def _monitor_work_area(self, x, y):
+        """包含 (x,y) 的显示器工作区 (l,t,r,b), 已排除任务栏; 失败退主屏.
+
+        tk 的 winfo_screenwidth 只认主屏, 多显示器下面板会被拽回主屏.
+        """
+        try:
+            class MONITORINFO(ctypes.Structure):
+                _fields_ = [("cbSize", wintypes.DWORD),
+                            ("rcMonitor", wintypes.RECT),
+                            ("rcWork", wintypes.RECT),
+                            ("dwFlags", wintypes.DWORD)]
+
+            u = ctypes.windll.user32
+            u.MonitorFromPoint.restype = ctypes.c_void_p
+            u.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+            MONITOR_DEFAULTTONEAREST = 2
+            hmon = u.MonitorFromPoint(wintypes.POINT(int(x), int(y)),
+                                      MONITOR_DEFAULTTONEAREST)
+            mi = MONITORINFO()
+            mi.cbSize = ctypes.sizeof(MONITORINFO)
+            if hmon and u.GetMonitorInfoW(ctypes.c_void_p(hmon),
+                                          ctypes.byref(mi)):
+                r = mi.rcWork
+                return r.left, r.top, r.right, r.bottom
+        except Exception:
+            pass
+        return (0, 0, self.root.winfo_screenwidth(),
+                self.root.winfo_screenheight())
+
+    @staticmethod
+    def _grab_screen(x, y, w, h):
+        """跨显示器截屏: PIL 默认只抓主屏, 副屏区域要走 all_screens+虚拟屏偏移."""
+        try:
+            u = ctypes.windll.user32
+            vx, vy = u.GetSystemMetrics(76), u.GetSystemMetrics(77)
+            img = ImageGrab.grab(
+                bbox=(x - vx, y - vy, x - vx + w, y - vy + h),
+                all_screens=True)
+            return img.convert("RGBA")
+        except Exception:
+            return Image.new("RGBA", (w, h), "#808080")
 
     def _close_btn(self, parent, command):
         """面板右上角关闭按钮: MDL2 图标 + 手型光标 + 悬停变色 + 大点击区."""
