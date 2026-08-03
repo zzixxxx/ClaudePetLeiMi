@@ -891,45 +891,27 @@ class Pet:
                 cb()
         lbl.bind("<Button-1>", on_click)
 
-        m.geometry(f"{w}x{h}+{x}+{y + 10}")
-
-        def _inside(wnd, px, py):
-            try:
-                return (wnd.winfo_rootx() <= px
-                        < wnd.winfo_rootx() + wnd.winfo_width()
-                        and wnd.winfo_rooty() <= py
-                        < wnd.winfo_rooty() + wnd.winfo_height())
-            except tk.TclError:
-                return False
+        m.geometry(f"{w}x{h}+{x}+{y}")
 
         def on_focus_out(_e):
             px, py = m.winfo_pointerxy()
             for wnd in (self.ctx_menu, self.ctx_submenu):
-                if wnd and wnd.winfo_exists() and _inside(wnd, px, py):
+                if wnd and wnd.winfo_exists() and self._pt_inside(wnd, px, py):
                     return
             self._close_menu()
 
-        # 入场动效: 上滑 10px 约 110ms
-        steps = 8
-
-        def _anim(i=1):
-            if not m.winfo_exists():
-                return
-            t = i / steps
-            try:
-                m.geometry(f"+{x}+{y + int((1 - t) * 10)}")
-            except tk.TclError:
-                return
-            if i < steps:
-                m.after(14, lambda: _anim(i + 1))
-            elif main:
-                m.focus_force()
-                m.bind("<FocusOut>", on_focus_out)
+        def on_done():
+            if main:
+                try:
+                    m.focus_force()
+                    m.bind("<FocusOut>", on_focus_out)
+                except tk.TclError:
+                    pass
 
         m.bind("<Escape>", lambda e: self._close_menu())
-        _anim()
+        self._animate_in(m, on_done)
         if main:
-            # FocusOut 受前台锁限制不可靠, 用轮询点外关闭兜底
+            # FocusOut 受前台锁限制不可靠, 全局钩子点外关闭兜底
             self._bind_outside_close(m, self._close_menu)
         return m
 
@@ -1230,23 +1212,35 @@ class Pet:
             if win and win.winfo_exists():
                 self._position_popup(win)
 
-    def _animate_in(self, win):
-        """开面板入场动效: 从下方 12px 上滑到位 (与菜单一致, TB 风格)."""
+    ANIM_STEPS = 16
+    ANIM_MS = 15     # 共约 240ms, 贴近 TTB/Win11 flyout 节奏
+    ANIM_DIST = 14
+
+    def _animate_in(self, win, on_done=None):
+        """入场动效 (面板/菜单共用): 上滑 + 淡入, 三次方 ease-out 减速."""
         win.update_idletasks()
         x, y = win.winfo_x(), win.winfo_y()
-        steps = 8
-        win.geometry(f"+{x}+{y + 12}")
+        try:
+            win.attributes("-alpha", 0.0)
+        except tk.TclError:
+            pass
+        win.geometry(f"+{x}+{y + self.ANIM_DIST}")
 
         def anim(i=1):
             if not win.winfo_exists():
                 return
-            t = i / steps
+            t = i / self.ANIM_STEPS
+            ease = 1 - (1 - t) ** 3
             try:
-                win.geometry(f"+{x}+{y + int((1 - t) * 12)}")
+                win.attributes("-alpha", ease)
+                win.geometry(
+                    f"+{x}+{y + int(self.ANIM_DIST * (1 - ease))}")
             except tk.TclError:
                 return
-            if i < steps:
-                win.after(14, lambda: anim(i + 1))
+            if i < self.ANIM_STEPS:
+                win.after(self.ANIM_MS, lambda: anim(i + 1))
+            elif on_done:
+                on_done()
 
         anim()
 
