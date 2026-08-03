@@ -1066,9 +1066,7 @@ class Pet:
         if sub_type:
             tk.Label(head, text="  " + sub_type.capitalize(), bg=bg, fg=dim,
                      font=(UI_FONT, 10)).pack(side="left")
-        close = tk.Label(head, text="✕", bg=bg, fg=dim, font=(UI_FONT, 10))
-        close.pack(side="right")
-        close.bind("<Button-1>", lambda e: self._close_popup())
+        self._close_btn(head, self._close_popup).pack(side="right")
 
         if not rows:
             tk.Label(self.popup, text="No data yet (waiting for first fetch)",
@@ -1250,6 +1248,16 @@ class Pet:
                 win.after(14, lambda: anim(i + 1))
 
         anim()
+
+    def _close_btn(self, parent, command):
+        """面板右上角关闭按钮: MDL2 图标 + 手型光标 + 悬停变色 + 大点击区."""
+        btn = tk.Label(parent, text="", bg=self.P_BG, fg=self.P_DIM,
+                       cursor="hand2", font=("Segoe MDL2 Assets", 10),
+                       padx=6, pady=4)
+        btn.bind("<Enter>", lambda e: btn.configure(fg=self.P_FG))
+        btn.bind("<Leave>", lambda e: btn.configure(fg=self.P_DIM))
+        btn.bind("<Button-1>", lambda e: command())
+        return btn
 
     @staticmethod
     def _pt_inside(w, px, py):
@@ -1450,9 +1458,7 @@ class Pet:
         head.pack(fill="x", padx=20, pady=(14, 4))
         tk.Label(head, text="会话状态", bg=bg, fg=fg,
                  font=(UI_FONT, 11, "bold")).pack(side="left")
-        close = tk.Label(head, text="✕", bg=bg, fg=dim, font=(UI_FONT, 10))
-        close.pack(side="right")
-        close.bind("<Button-1>", lambda e: self._close_sessions())
+        self._close_btn(head, self._close_sessions).pack(side="right")
 
         sess = self._read_sessions()
         items = sorted(sess.items(), key=lambda kv: kv[1].get("ts", 0),
