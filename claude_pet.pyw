@@ -114,29 +114,54 @@ def register_app_identity():
         pass
 
 
-def replace_existing_instance():
-    """顶替旧实例: 按 PID 文件找到上一个桌宠进程, 确认是 python 后结束它."""
+_MUTEX_HANDLE = None  # 持有到进程结束, 进程死亡后 OS 自动弃置
+
+
+def _kill_pid_file_process():
+    """结束 PID 文件里记录的旧桌宠 (确认镜像是 python 才动手)."""
     try:
         with open(PID_FILE, encoding="utf-8") as f:
             old_pid = int(f.read().strip())
     except (OSError, ValueError):
-        old_pid = None
-    if old_pid and old_pid != os.getpid():
-        PROCESS_TERMINATE = 0x0001
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        kernel32 = ctypes.windll.kernel32
-        h = kernel32.OpenProcess(
-            PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, False, old_pid
-        )
-        if h:
-            buf = ctypes.create_unicode_buffer(512)
-            size = ctypes.c_ulong(512)
-            if (
-                kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
-                and "python" in buf.value.lower()
-            ):
-                kernel32.TerminateProcess(h, 0)
-            kernel32.CloseHandle(h)
+        return
+    if not old_pid or old_pid == os.getpid():
+        return
+    PROCESS_TERMINATE = 0x0001
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    kernel32 = ctypes.windll.kernel32
+    h = kernel32.OpenProcess(
+        PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, False, old_pid)
+    if h:
+        buf = ctypes.create_unicode_buffer(512)
+        size = ctypes.c_ulong(512)
+        if (kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
+                and "python" in buf.value.lower()):
+            kernel32.TerminateProcess(h, 0)
+        kernel32.CloseHandle(h)
+
+
+def replace_existing_instance():
+    """单实例(顶替式): 命名互斥体仲裁 + PID 文件定位旧实例.
+
+    纯 PID 文件方案有竞态: 两个新实例同时启动(自动更新重启 与 SessionStart
+    自动拉起撞车)都读到同一个旧 PID, 谁也没杀谁 -> 桌面双蕾米.
+    互斥体保证竞态时恰好一个存活: 抢到=本尊(顺手清掉无互斥体的旧版实例);
+    没抢到=杀旧实例后等互斥体弃置(进程死亡 OS 自动释放), 5 秒等不到说明
+    另一个新实例赢了, 自己退出.
+    """
+    global _MUTEX_HANDLE
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.CreateMutexW(None, True, "Local\\ClaudePetLeiMi_Pet")
+    ERROR_ALREADY_EXISTS = 183
+    if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        _kill_pid_file_process()
+        WAIT_OBJECT_0, WAIT_ABANDONED = 0x0, 0x80
+        r = kernel32.WaitForSingleObject(handle, 5000)
+        if r not in (WAIT_OBJECT_0, WAIT_ABANDONED):
+            os._exit(0)
+    else:
+        _kill_pid_file_process()  # 兼容清掉不持互斥体的旧版本实例
+    _MUTEX_HANDLE = handle
     try:
         with open(PID_FILE, "w", encoding="utf-8") as f:
             f.write(str(os.getpid()))
