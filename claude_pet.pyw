@@ -1112,7 +1112,10 @@ class Pet:
                      font=(UI_FONT, 10)).pack(side="left")
             cur = extra.get("currency") or "USD"
             sym = "$" if cur == "USD" else cur + " "
-            tk.Label(row, text=f"{sym}{extra['used_credits']:.2f} spent",
+            # used_credits 是最小货币单位(美分), 按 decimal_places 换算成元
+            dp = extra.get("decimal_places")
+            amount = float(extra["used_credits"]) / (10 ** dp if dp else 1)
+            tk.Label(row, text=f"{sym}{amount:.2f} spent",
                      bg=bg, fg=dim, font=(UI_FONT, 9)).pack(side="right")
 
         foot = tk.Frame(self.popup, bg=bg)
