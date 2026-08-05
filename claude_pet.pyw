@@ -38,6 +38,16 @@ SESS_FILE = os.path.join(os.path.expanduser("~"), ".claude", "cc-pet-sessions.js
 SESS_REG_DIR = os.path.join(os.path.expanduser("~"), ".claude", "sessions")
 USAGE_FILE = os.path.join(os.path.expanduser("~"), ".claude", "cc-pet-usage.json")
 CRED_FILE = os.path.join(os.path.expanduser("~"), ".claude", ".credentials.json")
+CREDITS_FILE = os.path.join(os.path.expanduser("~"), ".claude",
+                            "cc-pet-credits.json")  # 消费历史 [[ts, 美元], ...]
+
+
+def extra_amount(extra):
+    """extra_usage -> 美元金额. used_credits 是最小货币单位, 按 decimal_places 换算."""
+    if not extra or extra.get("used_credits") is None:
+        return None
+    dp = extra.get("decimal_places")
+    return float(extra["used_credits"]) / (10 ** dp if dp else 1)
 
 # 会话状态 -> (Claude Code 风格动词, 颜色点)
 SESSION_STATES = {
@@ -393,6 +403,15 @@ class Pet:
         self._api_ts = 0.0
         self._alert_state = {}
         self.notify_alerts = True  # 用量告警通知开关 (高级菜单可关, 持久化)
+        # 消费监控: used_credits 历史 + 增长告警 (每多烧 $5 再提醒)
+        try:
+            with open(CREDITS_FILE, encoding="utf-8") as f:
+                self._credits_hist = json.load(f)
+            if not isinstance(self._credits_hist, list):
+                self._credits_hist = []
+        except Exception:
+            self._credits_hist = []
+        self._credits_alerted = None
         self.popup = None
         self.sess_popup = None
         self._popup_imgs = []
@@ -619,6 +638,7 @@ class Pet:
                     self._api_windows, self._api_full = windows, full
                     self._api_ts = time.time()
                     self._check_alerts(windows)
+                    self._track_credits(full)
             except Exception:
                 pass
             self._fetch_now.wait(timeout=USAGE_API_POLL_S)
@@ -644,6 +664,54 @@ class Pet:
             self.root.after(500, lambda: poll(n + 1))
 
         self.root.after(500, poll)
+
+    def _track_credits(self, full):
+        """消费监控: used_credits 变化落盘历史; 检测到增长(=正在按量计费)
+        立即弹扣费警告, 之后每多烧 $5 再提醒一次. 跑在 API 线程."""
+        amount = extra_amount(full.get("extra_usage") or {})
+        if amount is None:
+            return
+        hist = self._credits_hist
+        last = hist[-1][1] if hist else None
+        if last is not None and abs(amount - last) < 0.005:
+            return
+        hist.append([time.time(), round(amount, 2)])
+        cutoff = time.time() - 90 * 86400
+        while len(hist) > 2000 or (hist and hist[0][0] < cutoff):
+            hist.pop(0)
+        try:
+            tmp = CREDITS_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(hist, f)
+            os.replace(tmp, CREDITS_FILE)
+        except OSError:
+            pass
+        if (last is not None and amount > last and self.notify_alerts
+                and (self._credits_alerted is None
+                     or amount - self._credits_alerted >= 5)):
+            self._credits_alerted = amount
+            today = self._credits_today_delta(amount)
+            msg = f"Extra usage 正在计费！累计 ${amount:.2f}"
+            if today >= 0.01:
+                msg += f"，今日 +${today:.2f}"
+            self._notify(msg, "Claude 扣费警告")
+
+    def _credits_today_delta(self, current):
+        """今日新增消费 = 当前值 - 今日零点前最后一条记录 (无则用最早记录)."""
+        if not self._credits_hist:
+            return 0.0
+        from datetime import datetime
+        midnight = datetime.now().replace(hour=0, minute=0, second=0,
+                                          microsecond=0).timestamp()
+        baseline = None
+        for ts, val in self._credits_hist:
+            if ts < midnight:
+                baseline = val
+            else:
+                break
+        if baseline is None:
+            baseline = self._credits_hist[0][1]
+        return max(0.0, current - baseline)
 
     def _check_alerts(self, windows):
         """阈值提醒: percent 即各限额自身占比, 首次越过 80% 后每 +5% 通知一次.
@@ -1112,11 +1180,14 @@ class Pet:
                      font=(UI_FONT, 10)).pack(side="left")
             cur = extra.get("currency") or "USD"
             sym = "$" if cur == "USD" else cur + " "
-            # used_credits 是最小货币单位(美分), 按 decimal_places 换算成元
-            dp = extra.get("decimal_places")
-            amount = float(extra["used_credits"]) / (10 ** dp if dp else 1)
-            tk.Label(row, text=f"{sym}{amount:.2f} spent",
-                     bg=bg, fg=dim, font=(UI_FONT, 9)).pack(side="right")
+            amount = extra_amount(extra) or 0.0
+            today = self._credits_today_delta(amount)
+            text = f"{sym}{amount:.2f} spent"
+            if today >= 0.01:
+                text += f" · today +{sym}{today:.2f}"
+            tk.Label(row, text=text,
+                     bg=bg, fg=(self.P_OVER if today >= 0.01 else dim),
+                     font=(UI_FONT, 9)).pack(side="right")
 
         foot = tk.Frame(self.popup, bg=bg)
         foot.pack(fill="x", padx=20, pady=(12, 10))

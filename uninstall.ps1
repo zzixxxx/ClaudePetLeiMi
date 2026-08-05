@@ -39,7 +39,7 @@ if (Test-Path (Join-Path $dest ".git")) {
 } else {
     Remove-Item $dest -Recurse -Force
 }
-foreach ($f in @("cc-pet-state.json", "cc-pet-sessions.json", "cc-pet-usage.json")) {
+foreach ($f in @("cc-pet-state.json", "cc-pet-sessions.json", "cc-pet-usage.json", "cc-pet-credits.json")) {
     Remove-Item (Join-Path $env:USERPROFILE ".claude\$f") -Force
 }
 
