@@ -783,11 +783,13 @@ class Pet:
         """
         self.suite_on = not self.suite_on
         self._save_cfg()
-        self._close_fig()
-        if self.sess_popup and self.sess_popup.winfo_exists():
-            self._refresh_sessions()
-        elif self.popup and self.popup.winfo_exists():
-            self._refresh_popup()
+        # 无论开关方向, 一律重开面板 (完整入场动画, 效果立现):
+        # 原来开着会话面板就重开会话面板, 其余情况开用量面板
+        was_sessions = bool(self.sess_popup and self.sess_popup.winfo_exists())
+        self._close_popup()
+        self._close_sessions()
+        if was_sessions:
+            self._open_sessions()
         else:
             self._open_popup()
 
