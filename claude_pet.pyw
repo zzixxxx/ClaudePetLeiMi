@@ -1065,7 +1065,7 @@ class Pet:
         else:
             self._open_popup()
 
-    FIG_INSET = 58  # 立绘压进面板顶部的高度(px), 其余部分悬在面板外
+    FIG_INSET = 68  # 立绘压进面板顶部的高度(px), 其余部分悬在面板外
 
     def _close_fig(self):
         if self.fig_win:
