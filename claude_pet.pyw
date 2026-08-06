@@ -777,12 +777,19 @@ class Pet:
         self._save_cfg()
 
     def _toggle_suite(self):
-        """高级-切换套件: 蕾米埃尔套件皮肤 <-> 空白面板 (默认空白)."""
+        """高级-切换套件: 蕾米埃尔套件皮肤 <-> 空白面板 (默认空白).
+
+        切换后自动(重新)打开面板即时看效果: 已开面板原地刷新, 没开则打开用量面板.
+        """
         self.suite_on = not self.suite_on
         self._save_cfg()
         self._close_fig()
-        if self.popup and self.popup.winfo_exists():
+        if self.sess_popup and self.sess_popup.winfo_exists():
+            self._refresh_sessions()
+        elif self.popup and self.popup.winfo_exists():
             self._refresh_popup()
+        else:
+            self._open_popup()
 
     def _quit(self):
         if self.tray_icon:
@@ -839,7 +846,7 @@ class Pet:
             # 开启时前面带勾 (TTB 开机自启 同款样式)
             ("开启通知", self._toggle_notify,
              "" if self.notify_alerts else "", None),
-            ("切换套件", self._toggle_suite,
+            ("切换主题", self._toggle_suite,
              "" if self.suite_on else "", None),
             ("卸载", self._uninstall, "", None),
         ]
@@ -1081,11 +1088,18 @@ class Pet:
             self.popup.destroy()
             self.popup = None
 
+    def _active_panel(self):
+        """当前打开的面板 (用量/会话互斥, 最多一个)."""
+        for w in (self.popup, self.sess_popup):
+            if w and w.winfo_exists():
+                return w
+        return None
+
     def _place_fig(self):
-        """异形立绘窗口: 键色透明, 骑在用量面板顶缘 (下沿压入 FIG_INSET)."""
+        """异形立绘窗口: 键色透明, 骑在当前面板顶缘 (下沿压入 FIG_INSET)."""
+        panel = self._active_panel()
         path = os.path.join(ASSET_DIR, "panel_banner.png")
-        if not (self.suite_on and self.popup and self.popup.winfo_exists()
-                and os.path.exists(path)):
+        if not (self.suite_on and panel and os.path.exists(path)):
             return
         if not hasattr(Pet, "_fig_img"):
             img = Image.open(path).convert("RGBA")
@@ -1099,10 +1113,10 @@ class Pet:
             base.paste(on_white, (0, 0), mask)
             Pet._fig_img = base
         fw, fh = Pet._fig_img.size
-        x = self.popup.winfo_x() + (self.PANEL_W - fw) // 2
-        y = self.popup.winfo_y() + self.FIG_INSET - fh
+        x = panel.winfo_x() + (self.PANEL_W - fw) // 2
+        y = panel.winfo_y() + self.FIG_INSET - fh
         if not (self.fig_win and self.fig_win.winfo_exists()):
-            f = tk.Toplevel(self.popup)
+            f = tk.Toplevel(panel)
             f.overrideredirect(True)
             f.attributes("-topmost", True)
             f.attributes("-toolwindow", True)
@@ -1119,14 +1133,14 @@ class Pet:
         """立绘必须压在面板上方: tk 的 lift 对 topmost+键色窗口组合不可靠,
         直接 SetWindowPos 把面板插到立绘之下 (watch 循环里持续兜底,
         点击面板导致的系统抬升也会被压回)."""
-        if not (self.fig_win and self.fig_win.winfo_exists()
-                and self.popup and self.popup.winfo_exists()):
+        panel = self._active_panel()
+        if not (self.fig_win and self.fig_win.winfo_exists() and panel):
             return
         try:
             u = ctypes.windll.user32
             GA_ROOT = 2
             fig_h = u.GetAncestor(self.fig_win.winfo_id(), GA_ROOT)
-            pop_h = u.GetAncestor(self.popup.winfo_id(), GA_ROOT)
+            pop_h = u.GetAncestor(panel.winfo_id(), GA_ROOT)
             SWP = 0x0001 | 0x0002 | 0x0010  # NOSIZE|NOMOVE|NOACTIVATE
             u.SetWindowPos(pop_h, fig_h, 0, 0, 0, 0, SWP)
         except Exception:
@@ -1391,7 +1405,7 @@ class Pet:
         self._round_corners(win, w, h)
         self._decorate_border(win, w, h)
         win.geometry(f"+{x}+{y}")  # SetWindowRgn 可能在未映射时重置位置, 再钉一次
-        if win is self.popup:
+        if win in (self.popup, self.sess_popup):
             self._place_fig()
 
     def _follow_popups(self):
@@ -1422,7 +1436,7 @@ class Pet:
                 win.attributes("-alpha", ease)
                 win.geometry(
                     f"+{x}+{y + int(self.ANIM_DIST * (1 - ease))}")
-                if win is self.popup:  # 套件立绘与面板同步弹出
+                if win in (self.popup, self.sess_popup):  # 套件立绘同步弹出
                     self._place_fig()
                     if self.fig_win and self.fig_win.winfo_exists():
                         self.fig_win.attributes("-alpha", ease)
@@ -1594,6 +1608,7 @@ class Pet:
             self._open_sessions()
 
     def _close_sessions(self):
+        self._close_fig()
         if self.sess_popup:
             self.sess_popup.destroy()
             self.sess_popup = None
@@ -1692,6 +1707,10 @@ class Pet:
             w.destroy()
         win._border_size = None  # 边框控件已随子控件销毁, 需重建
         bg, fg, dim = self.P_BG, self.P_FG, self.P_DIM
+
+        if self.suite_on and os.path.exists(
+                os.path.join(ASSET_DIR, "panel_banner.png")):
+            tk.Frame(win, bg=bg, height=self.FIG_INSET - 10).pack(fill="x")
 
         head = tk.Frame(win, bg=bg)
         head.pack(fill="x", padx=20, pady=(14, 4))
