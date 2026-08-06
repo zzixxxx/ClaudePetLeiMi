@@ -403,6 +403,7 @@ class Pet:
         self._api_ts = 0.0
         self._alert_state = {}
         self.notify_alerts = True  # 用量告警通知开关 (高级菜单可关, 持久化)
+        self.suite_on = False      # 套件皮肤开关 (默认空白面板, 高级菜单切换)
         # 消费监控: used_credits 历史 + 增长告警 (每多烧 $5 再提醒)
         try:
             with open(CREDITS_FILE, encoding="utf-8") as f:
@@ -414,6 +415,7 @@ class Pet:
         self._credits_alerted = None
         self.popup = None
         self.sess_popup = None
+        self.fig_win = None  # 面板顶部异形立绘窗口
         self._popup_imgs = []
         self._sess_imgs = []
         self._tr_cache = {}
@@ -752,6 +754,7 @@ class Pet:
                 cfg = json.load(f)
             x, y = cfg.get("x"), cfg.get("y")
             self.notify_alerts = cfg.get("notify_alerts", True)
+            self.suite_on = cfg.get("suite_on", False)
         except Exception:
             pass
         if x is None or y is None:
@@ -764,13 +767,22 @@ class Pet:
         try:
             with open(CFG_FILE, "w", encoding="utf-8") as f:
                 json.dump({"x": self.root.winfo_x(), "y": self.root.winfo_y(),
-                           "notify_alerts": self.notify_alerts}, f)
+                           "notify_alerts": self.notify_alerts,
+                           "suite_on": self.suite_on}, f)
         except OSError:
             pass
 
     def _toggle_notify(self):
         self.notify_alerts = not self.notify_alerts
         self._save_cfg()
+
+    def _toggle_suite(self):
+        """高级-切换套件: 蕾米埃尔套件皮肤 <-> 空白面板 (默认空白)."""
+        self.suite_on = not self.suite_on
+        self._save_cfg()
+        self._close_fig()
+        if self.popup and self.popup.winfo_exists():
+            self._refresh_popup()
 
     def _quit(self):
         if self.tray_icon:
@@ -827,6 +839,8 @@ class Pet:
             # 开启时前面带勾 (TTB 开机自启 同款样式)
             ("开启通知", self._toggle_notify,
              "" if self.notify_alerts else "", None),
+            ("切换套件", self._toggle_suite,
+             "" if self.suite_on else "", None),
             ("卸载", self._uninstall, "", None),
         ]
         items = [
@@ -1051,10 +1065,72 @@ class Pet:
         else:
             self._open_popup()
 
+    FIG_INSET = 70  # 立绘压进面板顶部的高度(px), 其余部分悬在面板外
+
+    def _close_fig(self):
+        if self.fig_win:
+            try:
+                self.fig_win.destroy()
+            except tk.TclError:
+                pass
+            self.fig_win = None
+
     def _close_popup(self):
+        self._close_fig()
         if self.popup:
             self.popup.destroy()
             self.popup = None
+
+    def _place_fig(self):
+        """异形立绘窗口: 键色透明, 骑在用量面板顶缘 (下沿压入 FIG_INSET)."""
+        path = os.path.join(ASSET_DIR, "panel_banner.png")
+        if not (self.suite_on and self.popup and self.popup.winfo_exists()
+                and os.path.exists(path)):
+            return
+        if not hasattr(Pet, "_fig_img"):
+            img = Image.open(path).convert("RGBA")
+            # 半透明像素(翅膀羽毛)的 RGB 被原图黑底污染, 直接不透明渲染会发黑:
+            # 先按真实 alpha 混白去污染, 再用宽阈值(>=30)做键色蒙版保形体
+            on_white = Image.new("RGB", img.size, "#ffffff")
+            on_white.paste(img, (0, 0), img)
+            mask = img.getchannel("A").point(
+                lambda v: 255 if v >= 30 else 0)
+            base = Image.new("RGB", img.size, TRANS_COLOR)
+            base.paste(on_white, (0, 0), mask)
+            Pet._fig_img = base
+        fw, fh = Pet._fig_img.size
+        x = self.popup.winfo_x() + (self.PANEL_W - fw) // 2
+        y = self.popup.winfo_y() + self.FIG_INSET - fh
+        if not (self.fig_win and self.fig_win.winfo_exists()):
+            f = tk.Toplevel(self.popup)
+            f.overrideredirect(True)
+            f.attributes("-topmost", True)
+            f.attributes("-toolwindow", True)
+            f.attributes("-transparentcolor", TRANS_COLOR)
+            f.configure(bg=TRANS_COLOR)
+            photo = ImageTk.PhotoImage(Pet._fig_img)
+            f._photo = photo
+            tk.Label(f, image=photo, bd=0, bg=TRANS_COLOR).pack()
+            self.fig_win = f
+        self.fig_win.geometry(f"{fw}x{fh}+{x}+{y}")
+        self._assert_fig_z()
+
+    def _assert_fig_z(self):
+        """立绘必须压在面板上方: tk 的 lift 对 topmost+键色窗口组合不可靠,
+        直接 SetWindowPos 把面板插到立绘之下 (watch 循环里持续兜底,
+        点击面板导致的系统抬升也会被压回)."""
+        if not (self.fig_win and self.fig_win.winfo_exists()
+                and self.popup and self.popup.winfo_exists()):
+            return
+        try:
+            u = ctypes.windll.user32
+            GA_ROOT = 2
+            fig_h = u.GetAncestor(self.fig_win.winfo_id(), GA_ROOT)
+            pop_h = u.GetAncestor(self.popup.winfo_id(), GA_ROOT)
+            SWP = 0x0001 | 0x0002 | 0x0010  # NOSIZE|NOMOVE|NOACTIVATE
+            u.SetWindowPos(pop_h, fig_h, 0, 0, 0, 0, SWP)
+        except Exception:
+            pass
 
     def _open_popup(self):
         self._close_popup()
@@ -1134,6 +1210,13 @@ class Pet:
         data = self._api_full
         rows = limit_rows(data) if data else []
         now = time.time()
+
+        # 异形立绘悬于面板顶部 (独立键色窗口叠加, 参考套件图);
+        # 面板内只留白色占位, 让立绘压进来的下半身有落脚处
+        if self.suite_on and os.path.exists(
+                os.path.join(ASSET_DIR, "panel_banner.png")):
+            tk.Frame(self.popup, bg=bg,
+                     height=self.FIG_INSET - 10).pack(fill="x")
 
         # 标题: Your usage limits  <订阅类型>
         head = tk.Frame(self.popup, bg=bg)
@@ -1308,6 +1391,8 @@ class Pet:
         self._round_corners(win, w, h)
         self._decorate_border(win, w, h)
         win.geometry(f"+{x}+{y}")  # SetWindowRgn 可能在未映射时重置位置, 再钉一次
+        if win is self.popup:
+            self._place_fig()
 
     def _follow_popups(self):
         for win in (self.popup, self.sess_popup):
@@ -1337,6 +1422,10 @@ class Pet:
                 win.attributes("-alpha", ease)
                 win.geometry(
                     f"+{x}+{y + int(self.ANIM_DIST * (1 - ease))}")
+                if win is self.popup:  # 套件立绘与面板同步弹出
+                    self._place_fig()
+                    if self.fig_win and self.fig_win.winfo_exists():
+                        self.fig_win.attributes("-alpha", ease)
             except tk.TclError:
                 return
             if i < self.ANIM_STEPS:
@@ -1473,6 +1562,7 @@ class Pet:
         if click is not None:
             self._pending_click = None
             self._handle_outside_click(*click)
+        self._assert_fig_z()
         self.root.after(100, self._watch_outside_clicks)
 
     def _handle_outside_click(self, px, py, ts):
@@ -1485,7 +1575,8 @@ class Pet:
         if ts <= getattr(self, "_popover_opened", 0) + 0.05:
             return
         popups = [w for w in (self.popup, self.sess_popup, self.ctx_menu,
-                              self.ctx_submenu) if w and w.winfo_exists()]
+                              self.ctx_submenu, self.fig_win)
+                  if w and w.winfo_exists()]
         if not popups:
             return
         for w in popups + [self.root]:
