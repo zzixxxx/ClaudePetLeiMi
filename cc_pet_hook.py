@@ -56,13 +56,21 @@ def update_sessions(event, state, data):
 
 
 def pet_is_running():
+    kernel32 = ctypes.windll.kernel32
+    # 首选互斥体: 桌宠进程活着就一定持有, 不受 PID 文件过期/PID 复用影响
+    kernel32.OpenMutexW.restype = ctypes.c_void_p
+    SYNCHRONIZE = 0x00100000
+    h = kernel32.OpenMutexW(SYNCHRONIZE, False, "Local\\ClaudePetLeiMi_Pet")
+    if h:
+        kernel32.CloseHandle(h)
+        return True
+    # 兜底: 旧版桌宠不建互斥体, 退回 PID 文件判断
     try:
         with open(PID_FILE, encoding="utf-8") as f:
             pid = int(f.read().strip())
     except (OSError, ValueError):
         return False
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    kernel32 = ctypes.windll.kernel32
     h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not h:
         return False

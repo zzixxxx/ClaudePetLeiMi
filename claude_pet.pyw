@@ -125,29 +125,72 @@ def register_app_identity():
 
 
 _MUTEX_HANDLE = None  # 持有到进程结束, 进程死亡后 OS 自动弃置
+MUTEX_NAME = "Local\\ClaudePetLeiMi_Pet"
+ERROR_ALREADY_EXISTS = 183
+WAIT_OBJECT_0, WAIT_ABANDONED = 0x0, 0x80
+
+# use_last_error=True: ctypes 在 FFI 调用返回瞬间捕获线程 last-error,
+# 之后经 ctypes.get_last_error() 读取. 直接再调 kernel32.GetLastError()
+# 会被 ctypes 自身的中间调用污染 (实测漏判 ERROR_ALREADY_EXISTS ->
+# 并发启动的多个实例全部自认本尊 -> 桌面多蕾米).
+KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+KERNEL32.CreateMutexW.restype = wintypes.HANDLE
+KERNEL32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL,
+                                  wintypes.LPCWSTR]
+KERNEL32.WaitForSingleObject.restype = wintypes.DWORD
+KERNEL32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+KERNEL32.OpenProcess.restype = wintypes.HANDLE
+KERNEL32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL,
+                                 wintypes.DWORD]
+
+
+def _read_pid_file():
+    try:
+        with open(PID_FILE, encoding="utf-8") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _write_pid_file():
+    try:
+        with open(PID_FILE, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except OSError:
+        pass
+
+
+def _pid_is_python(pid):
+    """pid 活着且镜像是 python(w) 才认作桌宠进程 (防 PID 复用误判)."""
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    h = KERNEL32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return False
+    alive = False
+    buf = ctypes.create_unicode_buffer(512)
+    size = ctypes.c_ulong(512)
+    if KERNEL32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+        alive = "python" in buf.value.lower()
+    KERNEL32.CloseHandle(h)
+    return alive
 
 
 def _kill_pid_file_process():
     """结束 PID 文件里记录的旧桌宠 (确认镜像是 python 才动手)."""
-    try:
-        with open(PID_FILE, encoding="utf-8") as f:
-            old_pid = int(f.read().strip())
-    except (OSError, ValueError):
-        return
+    old_pid = _read_pid_file()
     if not old_pid or old_pid == os.getpid():
         return
     PROCESS_TERMINATE = 0x0001
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    kernel32 = ctypes.windll.kernel32
-    h = kernel32.OpenProcess(
+    h = KERNEL32.OpenProcess(
         PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, False, old_pid)
     if h:
         buf = ctypes.create_unicode_buffer(512)
         size = ctypes.c_ulong(512)
-        if (kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
+        if (KERNEL32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
                 and "python" in buf.value.lower()):
-            kernel32.TerminateProcess(h, 0)
-        kernel32.CloseHandle(h)
+            KERNEL32.TerminateProcess(h, 0)
+        KERNEL32.CloseHandle(h)
 
 
 def replace_existing_instance():
@@ -158,25 +201,22 @@ def replace_existing_instance():
     互斥体保证竞态时恰好一个存活: 抢到=本尊(顺手清掉无互斥体的旧版实例);
     没抢到=杀旧实例后等互斥体弃置(进程死亡 OS 自动释放), 5 秒等不到说明
     另一个新实例赢了, 自己退出.
+    启动仲裁之外, 运行期还有 Pet._poll_singleton 按 PID 文件对账自愈,
+    任何来路的多实例都会收敛回一只.
     """
     global _MUTEX_HANDLE
-    kernel32 = ctypes.windll.kernel32
-    handle = kernel32.CreateMutexW(None, True, "Local\\ClaudePetLeiMi_Pet")
-    ERROR_ALREADY_EXISTS = 183
-    if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+    ctypes.set_last_error(0)
+    handle = KERNEL32.CreateMutexW(None, True, MUTEX_NAME)
+    if handle and ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
         _kill_pid_file_process()
-        WAIT_OBJECT_0, WAIT_ABANDONED = 0x0, 0x80
-        r = kernel32.WaitForSingleObject(handle, 5000)
+        r = KERNEL32.WaitForSingleObject(handle, 5000)
         if r not in (WAIT_OBJECT_0, WAIT_ABANDONED):
             os._exit(0)
     else:
-        _kill_pid_file_process()  # 兼容清掉不持互斥体的旧版本实例
+        # 抢到互斥体 (或极罕见的创建失败): 兼容清掉不持互斥体的旧版本实例
+        _kill_pid_file_process()
     _MUTEX_HANDLE = handle
-    try:
-        with open(PID_FILE, "w", encoding="utf-8") as f:
-            f.write(str(os.getpid()))
-    except OSError:
-        pass
+    _write_pid_file()
 
 
 def _parse_reset(v):
@@ -446,6 +486,7 @@ class Pet:
         self._animate()
         self._poll_state()
         self._poll_usage()
+        self.root.after(self.SINGLETON_POLL_MS, self._poll_singleton)
 
     # ---------- 自动更新 ----------
 
@@ -1816,6 +1857,26 @@ class Pet:
         if raw == "idle" and age > IDLE_TO_STANDBY_S:
             return "standby"
         return raw
+
+    SINGLETON_POLL_MS = 10000
+
+    def _poll_singleton(self):
+        """运行期单实例自愈: pet.pid 的持有者是唯一本尊.
+
+        启动仲裁挡不住所有来路 (历史竞态残留/旧版本共存/手工双开),
+        所以每 10s 对账一次: 文件里是别的活着的 python 进程 -> 本进程
+        是多余的那只, 自行退出; 文件丢失或指向死进程 -> 认领回来.
+        多实例最迟两个周期收敛为一只.
+        """
+        pid = _read_pid_file()
+        if pid != os.getpid():
+            if pid and _pid_is_python(pid):
+                try:
+                    self._quit()
+                finally:
+                    os._exit(0)
+            _write_pid_file()
+        self.root.after(self.SINGLETON_POLL_MS, self._poll_singleton)
 
     def _poll_state(self):
         raw, ts = "idle", 0.0
