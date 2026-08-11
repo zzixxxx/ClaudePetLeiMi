@@ -40,6 +40,8 @@ USAGE_FILE = os.path.join(os.path.expanduser("~"), ".claude", "cc-pet-usage.json
 CRED_FILE = os.path.join(os.path.expanduser("~"), ".claude", ".credentials.json")
 CREDITS_FILE = os.path.join(os.path.expanduser("~"), ".claude",
                             "cc-pet-credits.json")  # 消费历史 [[ts, 美元], ...]
+PCT_HIST_FILE = os.path.join(os.path.expanduser("~"), ".claude",
+                             "cc-pet-usage-hist.json")  # 限额采样 {名称: [[ts, pct], ...]}
 
 
 def extra_amount(extra):
@@ -292,6 +294,17 @@ def fmt_resets_weekday(ts):
     return f"Resets {dt:%a} {hour12}:{dt:%M} {ampm}"
 
 
+def fmt_when(ts):
+    """预测时刻措辞: 当天 '6:30 PM', 跨天 'Tue 6:30 PM'."""
+    from datetime import datetime
+    dt = datetime.fromtimestamp(ts)
+    hour12 = dt.hour % 12 or 12
+    clock = f"{hour12}:{dt:%M} {'AM' if dt.hour < 12 else 'PM'}"
+    if dt.date() == datetime.now().date():
+        return clock
+    return f"{dt:%a} {clock}"
+
+
 def fmt_ago(ts):
     """'<1 min ago' / 'x min ago' / 'x hr ago'."""
     if not ts:
@@ -453,6 +466,14 @@ class Pet:
         except Exception:
             self._credits_hist = []
         self._credits_alerted = None
+        # 限额 percent 采样历史, 供燃烧速率外推 (重启不丢, 预测立即可用)
+        try:
+            with open(PCT_HIST_FILE, encoding="utf-8") as f:
+                self._pct_hist = json.load(f)
+            if not isinstance(self._pct_hist, dict):
+                self._pct_hist = {}
+        except Exception:
+            self._pct_hist = {}
         self.popup = None
         self.sess_popup = None
         self.fig_win = None  # 面板顶部异形立绘窗口
@@ -682,6 +703,7 @@ class Pet:
                     self._api_ts = time.time()
                     self._check_alerts(windows)
                     self._track_credits(full)
+                    self._track_pct(full)
             except Exception:
                 pass
             self._fetch_now.wait(timeout=USAGE_API_POLL_S)
@@ -707,6 +729,67 @@ class Pet:
             self.root.after(500, lambda: poll(n + 1))
 
         self.root.after(500, poll)
+
+    def _track_pct(self, full):
+        """记录各限额 percent 采样, 供燃烧速率预测. 跑在 API 线程.
+
+        限额重置 (pct 回落) 时该行旧样本作废; 采样最密 1 条/分钟, 只留 6 小时.
+        """
+        now = time.time()
+        hist = self._pct_hist
+        seen = set()
+        for name, pct, _reset, _dur, _grp, _act in limit_rows(full):
+            seen.add(name)
+            rows = hist.setdefault(name, [])
+            if rows and pct < rows[-1][1] - 0.5:
+                rows.clear()
+            if not rows or now - rows[-1][0] >= 60:
+                rows.append([round(now), round(pct, 2)])
+            cutoff = now - 6 * 3600
+            while rows and rows[0][0] < cutoff:
+                rows.pop(0)
+        for k in [k for k in hist if k not in seen]:
+            del hist[k]
+        try:
+            tmp = PCT_HIST_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(hist, f)
+            os.replace(tmp, PCT_HIST_FILE)
+        except OSError:
+            pass
+
+    def _predict_depletion(self, name, pct):
+        """按最近一小时消耗速率外推撞线 (100%) 时刻的 epoch.
+
+        参考 Claude-Code-Usage-Monitor 的 burn rate 口径 (最近一小时用量线性外推);
+        样本跨度不足 10 分钟或近一小时几乎没消耗时不预测, 返回 None.
+        """
+        rows = self._pct_hist.get(name) or []
+        now = time.time()
+        recent = [r for r in rows if r[0] >= now - 3600]
+        if len(recent) < 2:
+            return None
+        span = recent[-1][0] - recent[0][0]
+        burned = recent[-1][1] - recent[0][1]
+        if span < 600 or burned <= 0.1 or pct >= 100:
+            return None
+        return now + (100 - pct) / (burned / span)
+
+    def _projection(self, rows):
+        """预测行数据: (限额名, 撞线epoch, 是否早于重置). 无可预测限额返回 None.
+
+        优先报会撞线的限额里最早的一个; 都撑得到重置则报最紧的那个.
+        """
+        preds = []
+        for name, pct, reset, _dur, _grp, _act in rows:
+            hit = self._predict_depletion(name, pct)
+            if hit:
+                preds.append((hit, name, bool(reset and hit < reset)))
+        if not preds:
+            return None
+        danger = [p for p in preds if p[2]]
+        hit, name, before = min(danger or preds)
+        return name, hit, before
 
     def _track_credits(self, full):
         """消费监控: used_credits 变化落盘历史; 检测到增长(=正在按量计费)
@@ -1243,11 +1326,15 @@ class Pet:
         r = self._grid_row
         frac = pct / 100
         name_font = (UI_FONT, 10, "bold") if active else (UI_FONT, 10)
-        tk.Label(body, text=name, bg=bg, fg=self.P_FG, anchor="w",
-                 font=name_font).grid(row=r, column=0, sticky="w",
-                                      pady=(8, 0))
-        tk.Label(body, text=sub, bg=bg, fg=self.P_DIM, anchor="w",
-                 font=(UI_FONT, 9)).grid(row=r + 1, column=0, sticky="w")
+        name_lbl = tk.Label(body, text=name, bg=bg, fg=self.P_FG, anchor="w",
+                            font=name_font)
+        if sub:
+            name_lbl.grid(row=r, column=0, sticky="w", pady=(8, 0))
+            tk.Label(body, text=sub, bg=bg, fg=self.P_DIM, anchor="w",
+                     font=(UI_FONT, 9)).grid(row=r + 1, column=0, sticky="w")
+        else:
+            # 无重置时间副行时名称跨两行, 与进度条垂直居中对齐
+            name_lbl.grid(row=r, column=0, rowspan=2, sticky="w", pady=(8, 0))
         self._draw_bar(body, frac, frac >= 0.8).grid(
             row=r, column=1, rowspan=2, padx=(12, 10), pady=(8, 0))
         tk.Label(body, text=f"{round(pct)}% used", bg=bg, fg=self.P_DIM,
@@ -1327,6 +1414,22 @@ class Pet:
                 text += f" · today +{sym}{today:.2f}"
             tk.Label(row, text=text,
                      bg=bg, fg=(self.P_OVER if today >= 0.01 else dim),
+                     font=(UI_FONT, 9)).pack(side="right")
+
+        # 预测: 按最近一小时消耗速率外推撞线时刻 (参考 Claude-Code-Usage-Monitor)
+        proj = self._projection(rows) if rows else None
+        if proj:
+            pname, hit, before_reset = proj
+            prow = tk.Frame(self.popup, bg=bg)
+            prow.pack(fill="x", padx=20, pady=(14, 0))
+            tk.Label(prow, text="Projection", bg=bg, fg=fg,
+                     font=(UI_FONT, 10)).pack(side="left")
+            if before_reset:
+                ptext, pcolor = (f"{pname} runs out ~{fmt_when(hit)}",
+                                 self.P_OVER)
+            else:
+                ptext, pcolor = "On pace to last until reset", dim
+            tk.Label(prow, text=ptext, bg=bg, fg=pcolor,
                      font=(UI_FONT, 9)).pack(side="right")
 
         foot = tk.Frame(self.popup, bg=bg)
