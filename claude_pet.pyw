@@ -480,6 +480,7 @@ class Pet:
         self._popup_imgs = []
         self._sess_imgs = []
         self._tr_cache = {}
+        self._err_cache = {}  # transcript 尾部 API 错误探测缓存 {path: (size, err_ts)}
         # settings.json 的 model 若带 [1m], 记下其基础名用于 1M 窗口判定
         self._settings_1m_base = ""
         try:
@@ -1782,6 +1783,46 @@ class Pet:
             pass
         return {}
 
+    def _last_api_error_ts(self, path):
+        """transcript 最后一条主链记录若是 API 错误, 返回其 epoch, 否则 None.
+
+        API 报错/自动重试 (ECONNRESET 等) 不触发任何 hook, 桌宠只能从
+        transcript 尾部补判: isApiErrorMessage 记录即 CLI 里那行红字.
+        按 (路径, 文件大小) 缓存, 文件没长就不重读.
+        """
+        if not path:
+            return None
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return None
+        cached = self._err_cache.get(path)
+        if cached and cached[0] == size:
+            return cached[1]
+        err_ts = None
+        try:
+            with open(path, "rb") as f:
+                if size > 65536:
+                    f.seek(size - 65536)
+                tail = f.read().decode("utf-8", "ignore")
+            for line in reversed(tail.splitlines()):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    break  # 尾行被截断/超长, 本轮放弃判断
+                if rec.get("isSidechain"):
+                    continue
+                if rec.get("isApiErrorMessage"):
+                    err_ts = _parse_reset(rec.get("timestamp"))
+                break  # 只认最后一条完整主链记录
+        except OSError:
+            pass
+        self._err_cache[path] = (size, err_ts)
+        return err_ts
+
     def _transcript_info(self, path):
         """从 transcript 提取 (会话标题, context窗口文本). 按文件大小缓存.
 
@@ -1878,6 +1919,11 @@ class Pet:
         for idx, (sid, info) in enumerate(items[:12]):
             r = idx * 2
             state = info.get("state", "idle")
+            # 与主宠同口径: transcript 尾部的 API 错误记录晚于 hook 写入 -> 出错
+            if state in ("working", "thinking"):
+                err = self._last_api_error_ts(info.get("transcript"))
+                if err and err > info.get("ts", 0):
+                    state = "error"
             verb, color = SESSION_STATES.get(state, (state, dim))
             cwd = (info.get("cwd") or "").replace("/", "\\")
             tail = "\\".join(cwd.rstrip("\\").split("\\")[-2:]) if cwd else sid[:8]
@@ -1982,16 +2028,24 @@ class Pet:
         self.root.after(self.SINGLETON_POLL_MS, self._poll_singleton)
 
     def _poll_state(self):
-        raw, ts = "idle", 0.0
+        raw, ts, sid = "idle", 0.0, ""
         try:
             with open(STATE_FILE, encoding="utf-8") as f:
                 data = json.load(f)
             raw = data.get("state", "idle")
             ts = float(data.get("ts", 0))
+            sid = data.get("session_id", "")
         except Exception:
             pass
         if raw not in STATE_GIF:
             raw = "idle"
+        # API 报错/重试没有 hook 事件: turn 进行中却发现 transcript 尾部
+        # 是晚于最后一次 hook 写入的 API 错误记录, 判为出错 (05)
+        if raw in ("working", "thinking") and sid:
+            path = self._read_sessions().get(sid, {}).get("transcript")
+            err = self._last_api_error_ts(path)
+            if err and err > ts:
+                raw, ts = "error", err
         self._set_display(self._effective_state(raw, time.time() - ts))
         self.root.after(POLL_MS, self._poll_state)
 

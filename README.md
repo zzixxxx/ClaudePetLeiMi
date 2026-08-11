@@ -14,7 +14,7 @@ Claude Code 在干什么，桌宠就演什么（透明置顶小窗，任意拖�
 | <img src="gifs/01.gif" width="88"> | 思考中 | 正在生成回复、或两次工具调用之间 |
 | <img src="gifs/03.gif" width="88"> | 完成 | 回合结束（展示 10 秒）；空闲超 3 分钟也用这张待机 |
 | <img src="gifs/04.gif" width="88"> | 等你回复 | Claude 提问或请求授权，在等你 |
-| <img src="gifs/05.gif" width="88"> | 出错了 | 工具执行失败 |
+| <img src="gifs/05.gif" width="88"> | 出错了 | 工具执行失败，或 API 报错（连接中断 / 重试失败，从 transcript 补判）|
 | <img src="gifs/06.gif" width="88"> | 待机 | 没有活跃会话 |
 
 新开 Claude Code 会话时桌宠自动启动，多会话并发时跟随最近有动静的那个。
