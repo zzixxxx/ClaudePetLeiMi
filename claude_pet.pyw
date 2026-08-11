@@ -843,24 +843,20 @@ class Pet:
     def _check_alerts(self, windows):
         """阈值提醒: percent 即各限额自身占比, 首次越过 80% 后每 +5% 通知一次.
 
-        5h/7d 来自 windows; 单模型周限 (weekly_scoped, 如 Fable) 从 limits
-        数组补进来, 同口径按原始 percent 告警.
+        名称与面板同源 (limit_rows: Current session / All models / Fable...),
+        没有完整响应时退回 windows 的 5h/7d 标签.
+        窗口是否重置按 percent 回落判断 (resets_at 有秒级抖动, 按它对账
+        会把已告警档位清零导致重复通知).
         """
-        items = [(label, pct, reset) for label, pct, reset in windows]
         if self._api_full:
-            for lim in self._api_full.get("limits") or []:
-                if (lim.get("kind") == "weekly_scoped"
-                        and lim.get("percent") is not None):
-                    scope = lim.get("scope") or {}
-                    model = scope.get("model") if isinstance(scope, dict) else None
-                    mname = (model.get("display_name")
-                             if isinstance(model, dict) else None)
-                    items.append((mname or "scoped", float(lim["percent"]),
-                                  _parse_reset(lim.get("resets_at"))))
+            items = [(name, pct, reset) for name, pct, reset, _d, _g, _a
+                     in limit_rows(self._api_full)]
+        else:
+            items = [(label, pct, reset) for label, pct, reset in windows]
         for label, pct, reset in items:
-            prev_reset, prev_level = self._alert_state.get(label, (None, 0))
-            if reset != prev_reset:
-                prev_level = 0
+            prev_pct, prev_level = self._alert_state.get(label, (None, 0))
+            if prev_pct is not None and pct < prev_pct - 0.5:
+                prev_level = 0  # 限额已重置, 重新武装告警
             # 越过 80% 告警线后, 每 +5% 通知一次 (80/85/90/95/100)
             level = int(pct // 5) * 5 if pct >= 80 else 0
             if level > prev_level and self.notify_alerts:
@@ -868,7 +864,7 @@ class Pet:
                     f"用量告急，天才程序员即将陨落！\n"
                     f"{label} 已用 {round(pct)}%，"
                     f"{fmt_remain(reset)}后重置", "Claude 用量提醒")
-            self._alert_state[label] = (reset, max(level, prev_level))
+            self._alert_state[label] = (pct, max(level, prev_level))
 
     # ---------- 窗口 ----------
 
@@ -1257,19 +1253,25 @@ class Pet:
         self._assert_fig_z()
 
     def _assert_fig_z(self):
-        """立绘必须压在面板上方: tk 的 lift 对 topmost+键色窗口组合不可靠,
-        直接 SetWindowPos 把面板插到立绘之下 (watch 循环里持续兜底,
-        点击面板导致的系统抬升也会被压回)."""
-        panel = self._active_panel()
-        if not (self.fig_win and self.fig_win.winfo_exists() and panel):
+        """维持浮层 z 序: 子菜单 > 右键菜单 > 立绘 > 面板.
+
+        tk 的 lift 对 topmost+键色窗口组合不可靠, 点击面板还会被系统抬升,
+        watch 循环里持续用 SetWindowPos 兜底: 顶层那个不动, 其余依次插到
+        上一个之下 (右键菜单必须盖过面板, 立绘必须压在面板上方)."""
+        wins = [w for w in (self.ctx_submenu, self.ctx_menu, self.fig_win,
+                            self._active_panel())
+                if w and w.winfo_exists()]
+        if len(wins) < 2:
             return
         try:
             u = ctypes.windll.user32
             GA_ROOT = 2
-            fig_h = u.GetAncestor(self.fig_win.winfo_id(), GA_ROOT)
-            pop_h = u.GetAncestor(panel.winfo_id(), GA_ROOT)
             SWP = 0x0001 | 0x0002 | 0x0010  # NOSIZE|NOMOVE|NOACTIVATE
-            u.SetWindowPos(pop_h, fig_h, 0, 0, 0, 0, SWP)
+            prev = u.GetAncestor(wins[0].winfo_id(), GA_ROOT)
+            for w in wins[1:]:
+                h = u.GetAncestor(w.winfo_id(), GA_ROOT)
+                u.SetWindowPos(h, prev, 0, 0, 0, 0, SWP)
+                prev = h
         except Exception:
             pass
 
