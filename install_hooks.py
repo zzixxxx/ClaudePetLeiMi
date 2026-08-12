@@ -11,6 +11,7 @@ import sys
 BASE = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(BASE, "cc_pet_hook.py")
 STATUSLINE = os.path.join(BASE, "cc_statusline.py")
+PY = "python" if sys.platform == "win32" else "python3"
 
 EVENTS = {
     "UserPromptSubmit": "prompt",
@@ -83,7 +84,7 @@ def main():
         groups[:] = [g for g in groups if g.get("hooks")]
         groups.append({"hooks": [{
             "type": "command",
-            "command": "python",
+            "command": PY,
             "args": [HOOK, arg],
             "async": True,
             "timeout": 10,
@@ -93,7 +94,7 @@ def main():
     if not sl or "cc_statusline.py" in str(sl.get("command", "")):
         cfg["statusLine"] = {
             "type": "command",
-            "command": f'python "{STATUSLINE}"',
+            "command": f'{PY} "{STATUSLINE}"',
             "refreshInterval": 60,
         }
         print("statusLine: configured")

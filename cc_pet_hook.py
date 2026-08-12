@@ -6,18 +6,22 @@ Claude Code 会把事件 JSON 从 stdin 传进来.
 状态文件: ~/.claude/cc-pet-state.json  {"state": ..., "ts": ..., "session_id": ...}
 sessionstart 时若桌宠没在跑会自动拉起.
 """
-import ctypes
 import json
 import os
 import subprocess
 import sys
 import time
 
+IS_WIN = sys.platform == "win32"
+if IS_WIN:
+    import ctypes
+
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(os.path.expanduser("~"), ".claude", "cc-pet-state.json")
 SESS_FILE = os.path.join(os.path.expanduser("~"), ".claude", "cc-pet-sessions.json")
-PID_FILE = os.path.join(BASE, "pet.pid")
-PET_SCRIPT = os.path.join(BASE, "claude_pet.pyw")
+PID_FILE = os.path.join(BASE, "pet.pid" if IS_WIN else "pet-mac.pid")
+PET_SCRIPT = os.path.join(
+    BASE, "claude_pet.pyw" if IS_WIN else "claude_pet_mac.py")
 SESS_MAX_AGE_S = 4 * 3600  # 超 4 小时没动静的会话视为已死, 从列表剔除
 
 
@@ -56,6 +60,14 @@ def update_sessions(event, state, data):
 
 
 def pet_is_running():
+    if not IS_WIN:
+        # macOS: pid 文件 + 信号 0 探活 (桌宠自身还有 fcntl 锁兜底单例)
+        try:
+            with open(PID_FILE, encoding="utf-8") as f:
+                os.kill(int(f.read().strip()), 0)
+            return True
+        except (OSError, ValueError):
+            return False
     kernel32 = ctypes.windll.kernel32
     # 首选互斥体: 桌宠进程活着就一定持有, 不受 PID 文件过期/PID 复用影响
     kernel32.OpenMutexW.restype = ctypes.c_void_p
@@ -85,6 +97,10 @@ def pet_is_running():
 
 def ensure_pet_running():
     if pet_is_running():
+        return
+    if not IS_WIN:
+        subprocess.Popen([sys.executable, PET_SCRIPT],
+                         start_new_session=True, close_fds=True, cwd=BASE)
         return
     pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
     if not os.path.exists(pythonw):

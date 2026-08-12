@@ -47,6 +47,8 @@ Claude Code 在干什么，桌宠就演什么（透明置顶小窗，任意拖�
 
 ## 安装
 
+### Windows
+
 前提：Windows 10/11 + [Python 3.10+](https://www.python.org/downloads/)（勾选 Add to PATH）+ Claude Code。
 
 ```powershell
@@ -55,6 +57,23 @@ irm https://raw.githubusercontent.com/zzixxxx/ClaudePetLeiMi/main/install.ps1 | 
 
 装完桌宠自动出现在右下角；正在运行的 Claude Code 会话需重启后才会驱动桌宠。
 重复运行同一命令即为升级。
+
+### macOS（实验性，未经真机测试）
+
+> ⚠️ macOS 版目前**没有在真实 Mac 上测试过**：核心逻辑与面板渲染已在
+> 开发机验证，但窗口/菜单栏/通知等原生交互属于盲写，遇到跑不起来
+> 属正常，请带着 `--diag` 输出提 issue 或反馈。
+
+前提：macOS 12+ + python3 + Claude Code。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zzixxxx/ClaudePetLeiMi/main/install.sh | bash
+```
+
+自动装依赖（pyobjc/pillow）、合并 hooks、配置 LaunchAgent 开机自启。
+与 Windows 版共享 petcore 核心逻辑，平台差异：右键菜单是原生 NSMenu、
+托盘换成菜单栏徽章、通知走 osascript、凭证支持从 Keychain 读取
+（Claude Code 在 mac 上默认存 Keychain，首次访问系统可能弹授权）。
 
 ## 卸载
 
@@ -82,7 +101,13 @@ irm https://raw.githubusercontent.com/zzixxxx/ClaudePetLeiMi/main/uninstall.ps1 
 用量拿不到数据时，跑一下诊断并按提示处理：
 
 ```powershell
+# Windows
 python "$env:LOCALAPPDATA\ClaudePetLeiMi\claude_pet.pyw" --diag
+```
+
+```bash
+# macOS
+python3 "$HOME/Library/Application Support/ClaudePetLeiMi/claude_pet_mac.py" --diag
 ```
 
 它会逐项检查：Claude Code 登录凭证 → 用量接口连通性 → statusline 兜底数据 → hooks 是否生效。

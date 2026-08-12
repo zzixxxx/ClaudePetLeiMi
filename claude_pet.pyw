@@ -23,85 +23,36 @@ from ctypes import wintypes
 from PIL import (Image, ImageDraw, ImageFilter, ImageFont, ImageGrab,
                  ImageSequence, ImageTk)
 
+BASE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, BASE)  # 保证任何启动方式都能 import petcore
+
+from petcore import (CRED_FILE, POLL_MS, SESS_FILE, SESS_REG_DIR,
+                     SESSION_STATES, STATE_FILE, STATE_GIF, UPDATE_CHECK_S,
+                     USAGE_API_FRESH_S, USAGE_API_POLL_S, USAGE_FILE,
+                     AlertTracker, CreditsTracker, PctHistory,
+                     PET_SIZE, download_and_apply, draw_badge,
+                     effective_state, extra_amount, extract_usage,
+                     fetch_usage_api, fmt_ago, fmt_remain, fmt_resets_in,
+                     fmt_resets_weekday, fmt_when, last_api_error_ts,
+                     limit_rows, local_version, read_sessions,
+                     remote_version, settings_1m_base, transcript_info,
+                     usage_color)
+
 try:
     import pystray
     HAS_TRAY = True
 except ImportError:
     HAS_TRAY = False
 
-BASE = os.path.dirname(os.path.abspath(__file__))
 GIF_DIR = os.path.join(BASE, "gifs")
 CFG_FILE = os.path.join(BASE, "pet_config.json")
 PID_FILE = os.path.join(BASE, "pet.pid")
-STATE_FILE = os.path.join(os.path.expanduser("~"), ".claude", "cc-pet-state.json")
-SESS_FILE = os.path.join(os.path.expanduser("~"), ".claude", "cc-pet-sessions.json")
-SESS_REG_DIR = os.path.join(os.path.expanduser("~"), ".claude", "sessions")
-USAGE_FILE = os.path.join(os.path.expanduser("~"), ".claude", "cc-pet-usage.json")
-CRED_FILE = os.path.join(os.path.expanduser("~"), ".claude", ".credentials.json")
-CREDITS_FILE = os.path.join(os.path.expanduser("~"), ".claude",
-                            "cc-pet-credits.json")  # 消费历史 [[ts, 美元], ...]
-PCT_HIST_FILE = os.path.join(os.path.expanduser("~"), ".claude",
-                             "cc-pet-usage-hist.json")  # 限额采样 {名称: [[ts, pct], ...]}
-
-
-def extra_amount(extra):
-    """extra_usage -> 美元金额. used_credits 是最小货币单位, 按 decimal_places 换算."""
-    if not extra or extra.get("used_credits") is None:
-        return None
-    dp = extra.get("decimal_places")
-    return float(extra["used_credits"]) / (10 ** dp if dp else 1)
-
-# 会话状态 -> (Claude Code 风格动词, 颜色点)
-SESSION_STATES = {
-    "working": ("Doodling…", "#2760cf"),
-    "thinking": ("Pondering…", "#7c5cd6"),
-    "waiting": ("Waiting…", "#d29922"),
-    "done": ("Done", "#3fb950"),
-    "error": ("Error", "#e5484d"),
-    "idle": ("Idle", "#9a9aa5"),
-}
-
-USAGE_API = "https://api.anthropic.com/api/oauth/usage"
-USAGE_API_POLL_S = 180      # 接口限流较狠, 官方 UA + 180s 是安全间隔
-USAGE_API_FRESH_S = 600     # API 数据 10 分钟内算新鲜, 否则退回 statusline 文件
-CLAUDE_UA = "claude-code/2.1.220"
-
-# 自动更新: 对比远端 version.txt, 有新版则下载 zip 覆盖后自动重启
-VERSION_FILE = os.path.join(BASE, "version.txt")
-UPDATE_VER_URL = ("https://raw.githubusercontent.com/zzixxxx/"
-                  "ClaudePetLeiMi/main/version.txt")
-UPDATE_ZIP_URL = ("https://github.com/zzixxxx/ClaudePetLeiMi/"
-                  "archive/refs/heads/main.zip")
-UPDATE_CHECK_S = 24 * 3600
-
-
-def local_version():
-    try:
-        with open(VERSION_FILE, encoding="utf-8") as f:
-            return f.read().strip()
-    except OSError:
-        return "0"
 
 ASSET_DIR = os.path.join(BASE, "assets")  # Impact.ttf 备而不用 (已回退)
 ICON_PNG = os.path.join(ASSET_DIR, "pet.png")  # 托盘/快捷方式图标
 UI_FONT = "Microsoft YaHei UI"  # 面板字体, 与右键菜单 (msyh.ttc) 一致
 
-PET_SIZE = 200                 # 显示尺寸(像素)
-TRANS_COLOR = "#ff00fe"        # 透明键色
-POLL_MS = 500                  # 状态文件轮询间隔
-DONE_HOLD_S = 10               # done 展示时长, 之后转 idle
-IDLE_TO_STANDBY_S = 180        # idle 超 3 分钟 -> standby(03)
-STALE_S = 15 * 60              # 状态文件太久没更新视为会话已死 -> idle
-
-STATE_GIF = {
-    "working": "02",
-    "thinking": "01",
-    "done": "03",
-    "waiting": "04",
-    "error": "05",
-    "idle": "06",
-    "standby": "03",
-}
+TRANS_COLOR = "#ff00fe"        # 透明键色 (Windows 键色抠图专用)
 
 
 APP_AUMID = "ClaudePetLeiMi"
@@ -221,189 +172,6 @@ def replace_existing_instance():
     _write_pid_file()
 
 
-def _parse_reset(v):
-    """重置时间 -> epoch 秒. 兼容 epoch 数字 / ISO 字符串."""
-    if isinstance(v, (int, float)):
-        return v / 1000 if v > 1e12 else v
-    if isinstance(v, str):
-        try:
-            from datetime import datetime
-            return datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
-        except ValueError:
-            return None
-    return None
-
-
-def extract_usage(data):
-    """从 statusline JSON 提取 [(标签, 百分比0-100, 重置epoch), ...].
-
-    官方 schema: rate_limits.{five_hour,seven_day}.{used_percentage, resets_at}
-    仅订阅账号且会话首次 API 响应后才有, 每个窗口都可能缺.
-    """
-    rl = data.get("rate_limits") or {}
-    out = []
-    for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
-        item = rl.get(key)
-        if isinstance(item, dict) and item.get("used_percentage") is not None:
-            out.append((label, float(item["used_percentage"]),
-                        _parse_reset(item.get("resets_at"))))
-    return out
-
-
-def fmt_remain(ts):
-    if not ts:
-        return ""
-    remain = int(ts - time.time())
-    if remain <= 0:
-        return "now"
-    d, r = divmod(remain, 86400)
-    h, r = divmod(r, 3600)
-    m = r // 60
-    if d:
-        return f"{d}d{h}h"
-    if h:
-        return f"{h}h{m}m"
-    return f"{m}m"
-
-
-def fmt_resets_in(ts):
-    """参考面板措辞: 'Resets in 3 hr 40 min' / 'Resets in 6 days 10 hr'."""
-    if not ts:
-        return ""
-    remain = int(ts - time.time())
-    if remain <= 0:
-        return "Resets soon"
-    d, r = divmod(remain, 86400)
-    h, r = divmod(r, 3600)
-    m = r // 60
-    if d:
-        return f"Resets in {d} day{'s' if d > 1 else ''} {h} hr"
-    if h:
-        return f"Resets in {h} hr {m} min"
-    return f"Resets in {m} min"
-
-
-def fmt_resets_weekday(ts):
-    """周限额措辞: 'Resets Tue 9:00 PM'."""
-    if not ts:
-        return ""
-    from datetime import datetime
-    dt = datetime.fromtimestamp(ts)
-    hour12 = dt.hour % 12 or 12
-    ampm = "AM" if dt.hour < 12 else "PM"
-    return f"Resets {dt:%a} {hour12}:{dt:%M} {ampm}"
-
-
-def fmt_when(ts):
-    """预测时刻措辞: 当天 '6:30 PM', 跨天 'Tue 6:30 PM'."""
-    from datetime import datetime
-    dt = datetime.fromtimestamp(ts)
-    hour12 = dt.hour % 12 or 12
-    clock = f"{hour12}:{dt:%M} {'AM' if dt.hour < 12 else 'PM'}"
-    if dt.date() == datetime.now().date():
-        return clock
-    return f"{dt:%a} {clock}"
-
-
-def fmt_ago(ts):
-    """'<1 min ago' / 'x min ago' / 'x hr ago'."""
-    if not ts:
-        return "never"
-    s = int(time.time() - ts)
-    if s < 60:
-        return "<1 min ago"
-    if s < 3600:
-        return f"{s // 60} min ago"
-    return f"{s // 3600} hr ago"
-
-
-def usage_color(pct):
-    if pct >= 80:
-        return "#f85149"
-    if pct >= 50:
-        return "#d29922"
-    return "#3fb950"
-
-
-def draw_badge(pct5, pct7):
-    """单个托盘徽章: 上半 5h 用量, 下半 7d 用量, 各自按红黄绿分档底色."""
-    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.rectangle((0, 0, 63, 30), fill=usage_color(pct5))
-    d.rectangle((0, 33, 63, 63), fill=usage_color(pct7))
-    try:
-        font = ImageFont.truetype("arialbd.ttf", 26)
-    except OSError:
-        font = ImageFont.load_default()
-    d.text((32, 15), str(min(round(pct5), 99)), font=font, fill="white", anchor="mm")
-    d.text((32, 48), str(min(round(pct7), 99)), font=font, fill="white", anchor="mm")
-    mask = Image.new("L", (64, 64), 0)
-    ImageDraw.Draw(mask).rounded_rectangle((0, 0, 63, 63), radius=12, fill=255)
-    return Image.composite(img, Image.new("RGBA", (64, 64), (0, 0, 0, 0)), mask)
-
-
-def fetch_usage_api():
-    """直查 Anthropic OAuth 用量接口 (同 /usage 命令数据源).
-
-    读本地 Claude Code 凭证; token 过期就放弃 (Claude Code 跑起来会自己刷新),
-    调用方降级用 statusline 文件.
-    """
-    with open(CRED_FILE, encoding="utf-8") as f:
-        cred = json.load(f)
-    oauth = cred.get("claudeAiOauth") or cred
-    token = oauth.get("accessToken")
-    expires_ms = oauth.get("expiresAt") or 0
-    if not token or expires_ms / 1000 < time.time() + 60:
-        return None
-    req = urllib.request.Request(USAGE_API, headers={
-        "Authorization": f"Bearer {token}",
-        "anthropic-beta": "oauth-2025-04-20",
-        "User-Agent": CLAUDE_UA,
-        "Content-Type": "application/json",
-    })
-    with urllib.request.urlopen(req, timeout=15) as r:
-        data = json.load(r)
-    data["_subscription"] = oauth.get("subscriptionType") or ""
-    out = []
-    for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
-        item = data.get(key)
-        if isinstance(item, dict) and item.get("utilization") is not None:
-            out.append((label, float(item["utilization"]),
-                        _parse_reset(item.get("resets_at"))))
-    if not out:
-        return None
-    return out, data
-
-
-def limit_rows(data):
-    """从 API 完整响应提取详情面板行: [(名称, pct, reset_epoch, 时长秒, 分组), ...]."""
-    rows = []
-    for lim in data.get("limits") or []:
-        if not isinstance(lim, dict) or lim.get("percent") is None:
-            continue
-        kind = lim.get("kind", "")
-        group = lim.get("group") or ("session" if kind == "session" else "weekly")
-        scope = lim.get("scope") or {}
-        model = scope.get("model") if isinstance(scope, dict) else str(scope)
-        if isinstance(model, dict):
-            model = model.get("display_name") or model.get("id") or ""
-        if kind == "session":
-            name = "Current session"
-        elif kind == "weekly_all":
-            name = "All models"
-        elif kind == "weekly_scoped":
-            name = model or "Scoped models"
-        else:
-            name = f"{kind} {model}".strip()
-        duration = 5 * 3600 if group == "session" else 7 * 86400
-        # percent 已按该限额自身配额归一化为 0-100 (实测 Fable 70% 时
-        # weekly_all 才 36%, 若是全局口径不可能倒挂), 不做任何折算
-        rows.append((name, float(lim["percent"]),
-                     _parse_reset(lim.get("resets_at")), duration, group,
-                     bool(lim.get("is_active"))))
-    return rows
-
-
 def tray_area_rect():
     """返回 (任务栏rect, 托盘区rect), 找不到返回 None."""
     user32 = ctypes.windll.user32
@@ -454,26 +222,12 @@ class Pet:
         self._api_windows = None
         self._api_full = None
         self._api_ts = 0.0
-        self._alert_state = {}
         self.notify_alerts = True  # 用量告警通知开关 (高级菜单可关, 持久化)
         self.suite_on = False      # 套件皮肤开关 (默认空白面板, 高级菜单切换)
-        # 消费监控: used_credits 历史 + 增长告警 (每多烧 $5 再提醒)
-        try:
-            with open(CREDITS_FILE, encoding="utf-8") as f:
-                self._credits_hist = json.load(f)
-            if not isinstance(self._credits_hist, list):
-                self._credits_hist = []
-        except Exception:
-            self._credits_hist = []
-        self._credits_alerted = None
-        # 限额 percent 采样历史, 供燃烧速率外推 (重启不丢, 预测立即可用)
-        try:
-            with open(PCT_HIST_FILE, encoding="utf-8") as f:
-                self._pct_hist = json.load(f)
-            if not isinstance(self._pct_hist, dict):
-                self._pct_hist = {}
-        except Exception:
-            self._pct_hist = {}
+        # 共享状态机: 阈值告警 / 消费监控 / 限额采样预测 (petcore)
+        self._alerts = AlertTracker(self._notify)
+        self._credits = CreditsTracker(self._notify)
+        self._pct = PctHistory()
         self.popup = None
         self.sess_popup = None
         self.fig_win = None  # 面板顶部异形立绘窗口
@@ -482,15 +236,7 @@ class Pet:
         self._tr_cache = {}
         self._err_cache = {}  # transcript 尾部 API 错误探测缓存 {path: (size, err_ts)}
         # settings.json 的 model 若带 [1m], 记下其基础名用于 1M 窗口判定
-        self._settings_1m_base = ""
-        try:
-            with open(os.path.join(os.path.expanduser("~"), ".claude",
-                                   "settings.json"), encoding="utf-8") as f:
-                model_cfg = json.load(f).get("model") or ""
-            if "[1m]" in model_cfg:
-                self._settings_1m_base = model_cfg.split("[")[0]
-        except Exception:
-            pass
+        self._settings_1m_base = settings_1m_base()
         self._fetch_now = threading.Event()
         threading.Thread(target=self._api_loop, daemon=True).start()
         # 自动更新: 开发目录(.git)跳过, 避免覆盖工作区
@@ -523,31 +269,14 @@ class Pet:
 
     def _check_update(self, manual=False):
         """对比远端 version.txt; 有新版下载覆盖并重启. 返回是否触发了更新."""
-        req = urllib.request.Request(UPDATE_VER_URL,
-                                     headers={"User-Agent": "ClaudePetLeiMi"})
-        with urllib.request.urlopen(req, timeout=15) as r:
-            remote = r.read().decode("utf-8", "ignore").strip()
-        local = local_version()
+        import subprocess
+        remote = remote_version()
+        local = local_version(BASE)
         if not remote or remote == local:
             if manual:
                 self._notify(f"已是最新版本 v{local}")
             return False
-        import shutil
-        import subprocess
-        import tempfile
-        import zipfile
-        zpath = os.path.join(tempfile.gettempdir(), "ClaudePetLeiMi_upd.zip")
-        req = urllib.request.Request(UPDATE_ZIP_URL,
-                                     headers={"User-Agent": "ClaudePetLeiMi"})
-        with urllib.request.urlopen(req, timeout=120) as r, \
-                open(zpath, "wb") as f:
-            shutil.copyfileobj(r, f)
-        exdir = os.path.join(tempfile.gettempdir(), "ClaudePetLeiMi_upd")
-        shutil.rmtree(exdir, ignore_errors=True)
-        with zipfile.ZipFile(zpath) as z:
-            z.extractall(exdir)
-        shutil.copytree(os.path.join(exdir, "ClaudePetLeiMi-main"), BASE,
-                        dirs_exist_ok=True)
+        download_and_apply(BASE)
         # 幂等重跑 hooks 合并 (新版本可能新增事件)
         try:
             subprocess.run([sys.executable,
@@ -702,9 +431,9 @@ class Pet:
                     windows, full = result
                     self._api_windows, self._api_full = windows, full
                     self._api_ts = time.time()
-                    self._check_alerts(windows)
-                    self._track_credits(full)
-                    self._track_pct(full)
+                    self._alerts.check(full, windows, self.notify_alerts)
+                    self._credits.track(full, self.notify_alerts)
+                    self._pct.track(full)
             except Exception:
                 pass
             self._fetch_now.wait(timeout=USAGE_API_POLL_S)
@@ -730,141 +459,6 @@ class Pet:
             self.root.after(500, lambda: poll(n + 1))
 
         self.root.after(500, poll)
-
-    def _track_pct(self, full):
-        """记录各限额 percent 采样, 供燃烧速率预测. 跑在 API 线程.
-
-        限额重置 (pct 回落) 时该行旧样本作废; 采样最密 1 条/分钟, 只留 6 小时.
-        """
-        now = time.time()
-        hist = self._pct_hist
-        seen = set()
-        for name, pct, _reset, _dur, _grp, _act in limit_rows(full):
-            seen.add(name)
-            rows = hist.setdefault(name, [])
-            if rows and pct < rows[-1][1] - 0.5:
-                rows.clear()
-            if not rows or now - rows[-1][0] >= 60:
-                rows.append([round(now), round(pct, 2)])
-            cutoff = now - 6 * 3600
-            while rows and rows[0][0] < cutoff:
-                rows.pop(0)
-        for k in [k for k in hist if k not in seen]:
-            del hist[k]
-        try:
-            tmp = PCT_HIST_FILE + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(hist, f)
-            os.replace(tmp, PCT_HIST_FILE)
-        except OSError:
-            pass
-
-    def _predict_depletion(self, name, pct):
-        """按最近一小时消耗速率外推撞线 (100%) 时刻的 epoch.
-
-        参考 Claude-Code-Usage-Monitor 的 burn rate 口径 (最近一小时用量线性外推);
-        样本跨度不足 10 分钟或近一小时几乎没消耗时不预测, 返回 None.
-        """
-        rows = self._pct_hist.get(name) or []
-        now = time.time()
-        recent = [r for r in rows if r[0] >= now - 3600]
-        if len(recent) < 2:
-            return None
-        span = recent[-1][0] - recent[0][0]
-        burned = recent[-1][1] - recent[0][1]
-        if span < 600 or burned <= 0.1 or pct >= 100:
-            return None
-        return now + (100 - pct) / (burned / span)
-
-    def _projection(self, rows):
-        """预测行数据: (限额名, 撞线epoch, 是否早于重置). 无可预测限额返回 None.
-
-        优先报会撞线的限额里最早的一个; 都撑得到重置则报最紧的那个.
-        """
-        preds = []
-        for name, pct, reset, _dur, _grp, _act in rows:
-            hit = self._predict_depletion(name, pct)
-            if hit:
-                preds.append((hit, name, bool(reset and hit < reset)))
-        if not preds:
-            return None
-        danger = [p for p in preds if p[2]]
-        hit, name, before = min(danger or preds)
-        return name, hit, before
-
-    def _track_credits(self, full):
-        """消费监控: used_credits 变化落盘历史; 检测到增长(=正在按量计费)
-        立即弹扣费警告, 之后每多烧 $5 再提醒一次. 跑在 API 线程."""
-        amount = extra_amount(full.get("extra_usage") or {})
-        if amount is None:
-            return
-        hist = self._credits_hist
-        last = hist[-1][1] if hist else None
-        if last is not None and abs(amount - last) < 0.005:
-            return
-        hist.append([time.time(), round(amount, 2)])
-        cutoff = time.time() - 90 * 86400
-        while len(hist) > 2000 or (hist and hist[0][0] < cutoff):
-            hist.pop(0)
-        try:
-            tmp = CREDITS_FILE + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(hist, f)
-            os.replace(tmp, CREDITS_FILE)
-        except OSError:
-            pass
-        if (last is not None and amount > last and self.notify_alerts
-                and (self._credits_alerted is None
-                     or amount - self._credits_alerted >= 5)):
-            self._credits_alerted = amount
-            today = self._credits_today_delta(amount)
-            msg = f"Extra usage 正在计费！累计 ${amount:.2f}"
-            if today >= 0.01:
-                msg += f"，今日 +${today:.2f}"
-            self._notify(msg, "Claude 扣费警告")
-
-    def _credits_today_delta(self, current):
-        """今日新增消费 = 当前值 - 今日零点前最后一条记录 (无则用最早记录)."""
-        if not self._credits_hist:
-            return 0.0
-        from datetime import datetime
-        midnight = datetime.now().replace(hour=0, minute=0, second=0,
-                                          microsecond=0).timestamp()
-        baseline = None
-        for ts, val in self._credits_hist:
-            if ts < midnight:
-                baseline = val
-            else:
-                break
-        if baseline is None:
-            baseline = self._credits_hist[0][1]
-        return max(0.0, current - baseline)
-
-    def _check_alerts(self, windows):
-        """阈值提醒: percent 即各限额自身占比, 首次越过 80% 后每 +5% 通知一次.
-
-        名称与面板同源 (limit_rows: Current session / All models / Fable...),
-        没有完整响应时退回 windows 的 5h/7d 标签.
-        窗口是否重置按 percent 回落判断 (resets_at 有秒级抖动, 按它对账
-        会把已告警档位清零导致重复通知).
-        """
-        if self._api_full:
-            items = [(name, pct, reset) for name, pct, reset, _d, _g, _a
-                     in limit_rows(self._api_full)]
-        else:
-            items = [(label, pct, reset) for label, pct, reset in windows]
-        for label, pct, reset in items:
-            prev_pct, prev_level = self._alert_state.get(label, (None, 0))
-            if prev_pct is not None and pct < prev_pct - 0.5:
-                prev_level = 0  # 限额已重置, 重新武装告警
-            # 越过 80% 告警线后, 每 +5% 通知一次 (80/85/90/95/100)
-            level = int(pct // 5) * 5 if pct >= 80 else 0
-            if level > prev_level and self.notify_alerts:
-                self._notify(
-                    f"用量告急，天才程序员即将陨落！\n"
-                    f"{label} 已用 {round(pct)}%，"
-                    f"{fmt_remain(reset)}后重置", "Claude 用量提醒")
-            self._alert_state[label] = (pct, max(level, prev_level))
 
     # ---------- 窗口 ----------
 
@@ -1411,7 +1005,7 @@ class Pet:
             cur = extra.get("currency") or "USD"
             sym = "$" if cur == "USD" else cur + " "
             amount = extra_amount(extra) or 0.0
-            today = self._credits_today_delta(amount)
+            today = self._credits.today_delta(amount)
             text = f"{sym}{amount:.2f} spent"
             if today >= 0.01:
                 text += f" · today +{sym}{today:.2f}"
@@ -1420,7 +1014,7 @@ class Pet:
                      font=(UI_FONT, 9)).pack(side="right")
 
         # 预测: 按最近一小时消耗速率外推撞线时刻 (参考 Claude-Code-Usage-Monitor)
-        proj = self._projection(rows) if rows else None
+        proj = self._pct.projection(rows) if rows else None
         if proj:
             pname, hit, before_reset = proj
             prow = tk.Frame(self.popup, bg=bg)
@@ -1774,123 +1368,6 @@ class Pet:
         self._animate_in(self.sess_popup)
         self._bind_outside_close(self.sess_popup, self._close_sessions)
 
-    @staticmethod
-    def _read_sessions():
-        try:
-            with open(SESS_FILE, encoding="utf-8") as f:
-                sess = json.load(f)
-            if isinstance(sess, dict):
-                return sess
-        except Exception:
-            pass
-        return {}
-
-    def _last_api_error_ts(self, path):
-        """transcript 最后一条主链记录若是 API 错误, 返回其 epoch, 否则 None.
-
-        API 报错/自动重试 (ECONNRESET 等) 不触发任何 hook, 桌宠只能从
-        transcript 尾部补判: isApiErrorMessage 记录即 CLI 里那行红字.
-        按 (路径, 文件大小) 缓存, 文件没长就不重读.
-        """
-        if not path:
-            return None
-        try:
-            size = os.path.getsize(path)
-        except OSError:
-            return None
-        cached = self._err_cache.get(path)
-        if cached and cached[0] == size:
-            return cached[1]
-        err_ts = None
-        try:
-            with open(path, "rb") as f:
-                if size > 65536:
-                    f.seek(size - 65536)
-                tail = f.read().decode("utf-8", "ignore")
-            for line in reversed(tail.splitlines()):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except ValueError:
-                    break  # 尾行被截断/超长, 本轮放弃判断
-                # system/turn_duration/permission-mode 等元数据会跟在错误
-                # 记录后面, 不算恢复活动, 跳过继续往前找
-                if (rec.get("isSidechain")
-                        or rec.get("type") not in ("user", "assistant")):
-                    continue
-                if rec.get("isApiErrorMessage"):
-                    err_ts = _parse_reset(rec.get("timestamp"))
-                break  # 只认最后一条主链 user/assistant 记录
-        except OSError:
-            pass
-        self._err_cache[path] = (size, err_ts)
-        return err_ts
-
-    def _transcript_info(self, path):
-        """从 transcript 提取 (会话标题, context窗口文本). 按文件大小缓存.
-
-        标题 = ai-title 记录的 aiTitle; context = 最后一条 assistant 消息
-        usage 的 input+cache_read+cache_creation, 窗口按模型名 [1m] 判 1M/200k.
-        """
-        if not path:
-            return None, None
-        try:
-            size = os.path.getsize(path)
-        except OSError:
-            return None, None
-        cached = self._tr_cache.get(path)
-        if cached and cached[0] == size:
-            return cached[1], cached[2]
-
-        title, ctx_text, model = None, None, ""
-        try:
-            with open(path, "rb") as f:
-                head = f.read(512 * 1024).decode("utf-8", "ignore")
-                tail = head
-                if size > 2_000_000:
-                    f.seek(size - 2_000_000)
-                    tail = f.read().decode("utf-8", "ignore")
-            ctx = None
-            for chunk in (head, tail):
-                for line in chunk.splitlines():
-                    if '"ai-title"' in line:
-                        try:
-                            title = json.loads(line).get("aiTitle") or title
-                        except ValueError:
-                            pass
-            for line in reversed(tail.splitlines()):
-                if '"usage"' not in line or '"assistant"' not in line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except ValueError:
-                    continue
-                if rec.get("isSidechain"):
-                    continue
-                usage = (rec.get("message") or {}).get("usage") or {}
-                if usage.get("input_tokens") is None:
-                    continue
-                ctx = (usage.get("input_tokens", 0)
-                       + usage.get("cache_read_input_tokens", 0)
-                       + usage.get("cache_creation_input_tokens", 0))
-                model = (rec.get("message") or {}).get("model") or ""
-                break
-            if ctx is not None:
-                # transcript 里模型 ID 不带 [1m] 后缀, 结合 settings 配置判窗口
-                is_1m = ("[1m]" in model or ctx > 200_000
-                         or (self._settings_1m_base
-                             and model.startswith(self._settings_1m_base)))
-                win_size = 1_000_000 if is_1m else 200_000
-                win_label = "1M" if is_1m else "200k"
-                frac = ctx / win_size
-                ctx_text = (f"{ctx / 1000:.0f}k / {win_label}", frac)
-        except OSError:
-            pass
-        self._tr_cache[path] = (size, title, ctx_text)
-        return title, ctx_text
-
     def _refresh_sessions(self):
         win = self.sess_popup
         if not (win and win.winfo_exists()):
@@ -1910,7 +1387,7 @@ class Pet:
                  font=(UI_FONT, 11, "bold")).pack(side="left")
         self._close_btn(head, self._close_sessions).pack(side="right")
 
-        sess = self._read_sessions()
+        sess = read_sessions()
         items = sorted(sess.items(), key=lambda kv: kv[1].get("ts", 0),
                        reverse=True)
         if not items:
@@ -1926,13 +1403,14 @@ class Pet:
             state = info.get("state", "idle")
             # 与主宠同口径: transcript 尾部的 API 错误记录晚于 hook 写入 -> 出错
             if state in ("working", "thinking"):
-                err = self._last_api_error_ts(info.get("transcript"))
+                err = last_api_error_ts(info.get("transcript"), self._err_cache)
                 if err and err > info.get("ts", 0):
                     state = "error"
             verb, color = SESSION_STATES.get(state, (state, dim))
             cwd = (info.get("cwd") or "").replace("/", "\\")
             tail = "\\".join(cwd.rstrip("\\").split("\\")[-2:]) if cwd else sid[:8]
-            title, ctx = self._transcript_info(info.get("transcript"))
+            title, ctx = transcript_info(info.get("transcript"), self._tr_cache,
+                                          self._settings_1m_base)
             full_name = title or tail
             # 按像素宽度截断 (中文按字符数截会溢出单元格, 顶歪布局)
             import tkinter.font as tkfont
@@ -2000,18 +1478,6 @@ class Pet:
 
     # ---------- 状态 ----------
 
-    @staticmethod
-    def _effective_state(raw, age):
-        if raw == "done":
-            if age < DONE_HOLD_S:
-                return "done"
-            raw, age = "idle", age - DONE_HOLD_S
-        if raw in ("working", "thinking", "waiting", "error") and age > STALE_S:
-            raw, age = "idle", age - STALE_S
-        if raw == "idle" and age > IDLE_TO_STANDBY_S:
-            return "standby"
-        return raw
-
     SINGLETON_POLL_MS = 10000
 
     def _poll_singleton(self):
@@ -2047,11 +1513,11 @@ class Pet:
         # API 报错/重试没有 hook 事件: turn 进行中却发现 transcript 尾部
         # 是晚于最后一次 hook 写入的 API 错误记录, 判为出错 (05)
         if raw in ("working", "thinking") and sid:
-            path = self._read_sessions().get(sid, {}).get("transcript")
-            err = self._last_api_error_ts(path)
+            path = read_sessions().get(sid, {}).get("transcript")
+            err = last_api_error_ts(path, self._err_cache)
             if err and err > ts:
                 raw, ts = "error", err
-        self._set_display(self._effective_state(raw, time.time() - ts))
+        self._set_display(effective_state(raw, time.time() - ts))
         self.root.after(POLL_MS, self._poll_state)
 
     # ---------- 用量条 ----------
