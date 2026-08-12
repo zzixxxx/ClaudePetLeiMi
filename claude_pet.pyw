@@ -1815,11 +1815,14 @@ class Pet:
                     rec = json.loads(line)
                 except ValueError:
                     break  # 尾行被截断/超长, 本轮放弃判断
-                if rec.get("isSidechain"):
+                # system/turn_duration/permission-mode 等元数据会跟在错误
+                # 记录后面, 不算恢复活动, 跳过继续往前找
+                if (rec.get("isSidechain")
+                        or rec.get("type") not in ("user", "assistant")):
                     continue
                 if rec.get("isApiErrorMessage"):
                     err_ts = _parse_reset(rec.get("timestamp"))
-                break  # 只认最后一条完整主链记录
+                break  # 只认最后一条主链 user/assistant 记录
         except OSError:
             pass
         self._err_cache[path] = (size, err_ts)
