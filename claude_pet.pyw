@@ -1320,7 +1320,23 @@ class Pet:
             self._pending_click = None
             self._handle_outside_click(*click)
         self._assert_fig_z()
+        self._assert_topmost()
         self.root.after(100, self._watch_outside_clicks)
+
+    def _assert_topmost(self):
+        """-topmost 只在启动时设一次, explorer 重启/全屏应用/安全桌面
+        会剥掉 WS_EX_TOPMOST, 蕾米从此沉底. 检查扩展样式, 丢了才重新钉回
+        (无条件 SetWindowPos 会每 100ms 抢一次 z 序, 干扰面板层级)."""
+        try:
+            u = ctypes.windll.user32
+            GWL_EXSTYLE, WS_EX_TOPMOST = -20, 0x00000008
+            hwnd = self._top_hwnd(self.root)
+            if not (u.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST):
+                HWND_TOPMOST = ctypes.c_ssize_t(-1)
+                SWP = 0x0001 | 0x0002 | 0x0010  # NOSIZE|NOMOVE|NOACTIVATE
+                u.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP)
+        except Exception:
+            pass
 
     def _handle_outside_click(self, px, py, ts):
         """鼠标按下坐标不在桌宠/面板/菜单内 -> 关闭所有弹层.
