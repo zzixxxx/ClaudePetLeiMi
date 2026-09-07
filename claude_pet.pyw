@@ -846,15 +846,19 @@ class Pet:
         self.fig_win.geometry(f"{fw}x{fh}+{x}+{y}")
         self._assert_fig_z()
 
+    def _float_wins(self):
+        """当前存在的浮层, 按期望 z 序从上到下: 子菜单 > 右键菜单 > 立绘 > 面板."""
+        return [w for w in (self.ctx_submenu, self.ctx_menu, self.fig_win,
+                            self._active_panel())
+                if w and w.winfo_exists()]
+
     def _assert_fig_z(self):
         """维持浮层 z 序: 子菜单 > 右键菜单 > 立绘 > 面板.
 
         tk 的 lift 对 topmost+键色窗口组合不可靠, 点击面板还会被系统抬升,
         watch 循环里持续用 SetWindowPos 兜底: 顶层那个不动, 其余依次插到
         上一个之下 (右键菜单必须盖过面板, 立绘必须压在面板上方)."""
-        wins = [w for w in (self.ctx_submenu, self.ctx_menu, self.fig_win,
-                            self._active_panel())
-                if w and w.winfo_exists()]
+        wins = self._float_wins()
         if len(wins) < 2:
             return
         try:
@@ -1274,6 +1278,7 @@ class Pet:
         GIL 的窗口期回调, 直接 PyEval_RestoreThread 致命崩溃.
         """
         self._pending_click = None  # (x, y), 钩子线程写 / tk 轮询消费
+        self._repin_ts = 0.0        # 上次重钉 topmost 的时刻 (节流)
 
         class MSLLHOOKSTRUCT(ctypes.Structure):
             _fields_ = [("pt", wintypes.POINT),
@@ -1324,17 +1329,50 @@ class Pet:
         self.root.after(100, self._watch_outside_clicks)
 
     def _assert_topmost(self):
-        """-topmost 只在启动时设一次, explorer 重启/全屏应用/安全桌面
-        会剥掉 WS_EX_TOPMOST, 蕾米从此沉底. 检查扩展样式, 丢了才重新钉回
-        (无条件 SetWindowPos 会每 100ms 抢一次 z 序, 干扰面板层级)."""
+        """-topmost 只在启动时设一次, explorer 重启/全屏应用/安全桌面/锁屏
+        会把蕾米丢回普通层. 两种丢法: (a) WS_EX_TOPMOST 被剥掉; (b) 标志
+        还在, z 序却已排到普通窗口之下 (v1.3.1 只查 (a), 漏了 (b), 于是
+        "明明置顶却被遮"). 统一按 z 序判定: 沿 GW_HWNDPREV 向上走, 上方
+        若有可见且非 topmost 的桌面层窗口, 说明已沉底, 重新钉回.
+        开始菜单/Alt-Tab 等壳层窗口位于更高的 z-band (GetWindowBand > 1),
+        天然盖在一切 topmost 之上, 不算普通窗口, 跳过以免误判;
+        另加 1s 节流, 避免连续 SetWindowPos 干扰面板层级."""
         try:
             u = ctypes.windll.user32
-            GWL_EXSTYLE, WS_EX_TOPMOST = -20, 0x00000008
+            GWL_EXSTYLE, WS_EX_TOPMOST, GW_HWNDPREV = -20, 0x00000008, 3
             hwnd = self._top_hwnd(self.root)
-            if not (u.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST):
-                HWND_TOPMOST = ctypes.c_ssize_t(-1)
-                SWP = 0x0001 | 0x0002 | 0x0010  # NOSIZE|NOMOVE|NOACTIVATE
-                u.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP)
+            if u.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST:
+                # 标志在: 逐个看上方窗口, 遇到普通层的可见窗口即判沉底
+                get_band = getattr(u, "GetWindowBand", None)
+                band = wintypes.DWORD(1)
+                h, sunk = u.GetWindow(hwnd, GW_HWNDPREV), False
+                for _ in range(1024):
+                    if not h:
+                        break
+                    if (u.IsWindowVisible(h)
+                            and not (u.GetWindowLongW(h, GWL_EXSTYLE)
+                                     & WS_EX_TOPMOST)):
+                        band.value = 1
+                        if get_band:
+                            get_band(h, ctypes.byref(band))
+                        if band.value <= 1:
+                            sunk = True
+                            break
+                    h = u.GetWindow(h, GW_HWNDPREV)
+                if not sunk:
+                    return
+            now = time.monotonic()
+            if now - self._repin_ts < 1.0:
+                return
+            self._repin_ts = now
+            HWND_TOPMOST = ctypes.c_ssize_t(-1)
+            SWP = 0x0001 | 0x0002 | 0x0010  # NOSIZE|NOMOVE|NOACTIVATE
+            u.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP)
+            # 本体钉到了 topmost 层顶, 已打开的浮层要重新压回本体之上
+            # (从下到上依次钉, _assert_fig_z 随后维持它们之间的相对顺序)
+            for w in reversed(self._float_wins()):
+                u.SetWindowPos(self._top_hwnd(w), HWND_TOPMOST,
+                               0, 0, 0, 0, SWP)
         except Exception:
             pass
 
